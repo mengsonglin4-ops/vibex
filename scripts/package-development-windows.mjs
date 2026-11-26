@@ -7,6 +7,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkDevelopmentWindowsShaders } from "./check-development-windows-shaders.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -86,6 +87,7 @@ function main() {
     if (!statSync(source).isFile()) throw new Error(`Missing payload file: ${source}`);
     if (destination.endsWith(".exe")) assertWindowsX64(source);
   }
+  const embeddedWindowsShaders = checkDevelopmentWindowsShaders(binaryDir);
   mkdirSync(output, { recursive: true });
   for (const [source, destination] of payload) {
     const target = join(output, destination);
@@ -128,13 +130,14 @@ function main() {
     runAttempt: process.env.GITHUB_RUN_ATTEMPT || "local",
     version, platform: "windows", architecture: "x64", profile: "dev", channel: "preview",
     entrypoint: "vibex-desktop.exe", installPackage: "unmanaged",
-    build: { debug: 0, incremental: false, jobs: 2, locked: true },
+    build: { debug: 0, debugAssertions: false, buildScriptDebugAssertions: false, incremental: false, jobs: 2, locked: true },
     checks: {
       windowsX64Executables: "passed", desktopProbe: "passed", tuiVersion: "passed",
       embeddedAssets: "checked_by_rust_include_bytes", fileHashes: "sha256",
+      embeddedWindowsShaders,
       nativePixelsVerified: false, localGuiAcceptance: "required"
     },
-    resources: { fonts: "embedded", icons: "embedded", pdfium: "not_bundled_windows_validation_deferred" },
+    resources: { fonts: "embedded", icons: "embedded", windowsShaders: "embedded_dxbc", pdfium: "not_bundled_windows_validation_deferred" },
     files
   };
   writeFileSync(join(output, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);

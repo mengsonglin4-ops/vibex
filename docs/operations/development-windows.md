@@ -15,17 +15,28 @@ It installs the frozen pnpm dependencies before building:
 $env:CARGO_BUILD_JOBS = '2'
 $env:CARGO_INCREMENTAL = '0'
 $env:CARGO_PROFILE_DEV_DEBUG = '0'
+$env:CARGO_PROFILE_DEV_DEBUG_ASSERTIONS = 'false'
+$env:CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG_ASSERTIONS = 'false'
 $env:VIBEX_CHANNEL = 'preview'
 $env:VIBEX_INSTALL_PACKAGE = 'unmanaged'
 cargo build -p vibex-desktop -p vibex-client --locked --jobs 2
 node scripts/package-development-windows.mjs --output target/development-artifact
 ```
 
-This is Cargo's `dev` profile, with debug symbols and incremental output
-disabled. The repository's dependency optimization remains in force. The job
+This is Cargo's `dev` profile, with debug symbols, debug assertions (including
+build scripts) and incremental output disabled. The repository's dependency
+optimization remains in force. The job
 has a 120-minute limit and does not save or upload Cargo's `target` directory.
 The initial workflow uses no dependency cache, so a clean build does not depend
 on a previous run's state.
+
+The two debug-assertion settings are required for portability. GPUI's Windows
+debug renderer loads HLSL files from absolute Cargo source and build-output
+paths. Disabling debug symbols alone does not select its embedded shaders.
+With debug assertions disabled in both the library and its build script, the
+Windows SDK's `fxc.exe` compiles the shaders into embedded DXBC bytecode. The
+workflow explicitly locates FXC and sets `GPUI_FXC_PATH`. A local equivalent
+build needs the same SDK compiler available.
 
 ## Download and run
 
@@ -91,6 +102,15 @@ credentials, or validate a real local workspace. After download, launch the
 desktop locally and check the window, text rendering, terminal and the changed
 feature before accepting the build.
 
+Before copying the payload, a separate shader gate reads GPUI's generated
+`debug/build/gpui-fast-windows-*/out/shaders_bytes.rs`, requires all 16 expected
+FXC shader arrays and checks that each exact byte sequence occurs in the desktop
+EXE. It also rejects the known runtime HLSL source/output path strings. This
+catches the source-dependent debug renderer even on a hosted runner without a
+usable graphics adapter. It is a portability check, not a claim of rendered
+pixels or complete GPU compatibility. Use a fresh target directory for this
+workflow; ambiguous multiple generated GPUI binding files are rejected.
+
 ## Manifest contract
 
 `manifest.json` has integer `schemaVersion: 1`, `project: "vibex"`,
@@ -98,6 +118,9 @@ feature before accepting the build.
 `version`, `platform: "windows"`, `architecture: "x64"`, `profile: "dev"`,
 `channel: "preview"`, `entrypoint: "vibex-desktop.exe"`,
 `installPackage: "unmanaged"`, build settings, check results and resource status.
+`build.debugAssertions` and `build.buildScriptDebugAssertions` are `false`;
+`checks.embeddedWindowsShaders` records `status: "passed"`, `shaderCount: 16`
+and `format: "DXBC"`; `resources.windowsShaders` is `"embedded_dxbc"`.
 Each `files` entry has a forward-slash relative `path`, byte `size` and lowercase
 hex `sha256`. It covers every payload file except the manifest itself, which
 cannot contain its own digest. No absolute build paths, probe home, application

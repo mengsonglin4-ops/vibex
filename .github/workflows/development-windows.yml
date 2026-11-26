@@ -16,6 +16,10 @@ env:
   CARGO_BUILD_JOBS: "2"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # GPUI's debug renderer loads HLSL from absolute build-machine paths. Both
+  # the library and its build script must select the embedded-bytecode branch.
+  CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "false"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG_ASSERTIONS: "false"
   VIBEX_CHANNEL: preview
   VIBEX_INSTALL_PACKAGE: unmanaged
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
@@ -54,6 +58,17 @@ jobs:
             $value = [Environment]::GetEnvironmentVariable($key, 'Process')
             if ($value) { "$key=$value" >> $env:GITHUB_ENV }
           }
+          $fxc = (Get-Command fxc.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+          if (-not $fxc) {
+            $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+            $fxc = Get-ChildItem -LiteralPath $sdkBin -Directory |
+              Sort-Object Name -Descending |
+              ForEach-Object { Join-Path $_.FullName 'x64\fxc.exe' } |
+              Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          }
+          if (-not $fxc) { throw 'Windows SDK FXC compiler is required for portable GPUI shaders' }
+          "GPUI_FXC_PATH=$fxc" >> $env:GITHUB_ENV
+          Write-Output "GPUI shader compiler: $fxc"
           if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
             choco install nasm --yes --no-progress --limit-output
             if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
@@ -71,6 +86,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Frontend checks failed' }
           node --check scripts/package-development-windows.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Packager syntax check failed' }
+          node scripts/check-development-windows-shaders.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Portable shader gate regression checks failed' }
           cargo metadata --locked --no-deps --format-version 1 > "$env:RUNNER_TEMP\vibex-metadata.json"
           if ($LASTEXITCODE -ne 0) { throw 'Locked workspace metadata failed' }
       - name: Build desktop and terminal client

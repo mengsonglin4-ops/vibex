@@ -23,6 +23,12 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 - `CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_INCREMENTAL=0`, `CARGO_BUILD_JOBS=2`,
   `VIBEX_CHANNEL=preview`, `VIBEX_INSTALL_PACKAGE=unmanaged`. The installation
   override is read at runtime, so the launcher also sets it.
+- Set `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false` and
+  `CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG_ASSERTIONS=false`. Debug symbols and
+  debug assertions are different Cargo controls. GPUI's debug renderer reads
+  absolute Cargo source/output HLSL paths; its non-debug renderer embeds FXC
+  bytes generated only when its build script also has debug assertions off.
+  Require the Windows SDK `fxc.exe` and set `GPUI_FXC_PATH` explicitly.
 - Desktop preview derives `<parent of VIBEX_DB_PATH>/desktop-preview`; TUI reads
   `VIBEX_HOME` directly. The launcher points both at the same isolated home.
 - Resolve relative `DataRoot` through PowerShell's session-state path API,
@@ -38,6 +44,13 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   are lowercase SHA-256. The manifest excludes its own self-referential hash.
 - `--probe` is `first-frame-probe.v1`/`compiled_probe`, Windows/x86_64,
   preview and `nativePixelsVerified=false`. Never interpret it as GUI testing.
+- Before packaging, compare the desktop executable against all 16 expected
+  DXBC arrays in the single generated GPUI `shaders_bytes.rs`. Reject known
+  runtime HLSL path strings in UTF-8 or UTF-16. This gate detects the source-path
+  dependency without relying on a hosted runner's GPU/display availability.
+  Manifest records `build.debugAssertions=false`,
+  `build.buildScriptDebugAssertions=false`, and
+  `checks.embeddedWindowsShaders={status: passed, shaderCount: 16, format: DXBC}`.
 - PDFium remains absent while the source review marks Windows deferred. Font
   bytes are embedded; full font license texts accompany third-party notices.
 
@@ -48,6 +61,8 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 | Existing output directory | Reject without deleting or overwriting it. |
 | Missing/invalid x64 executable or license input | Fail before creating output. |
 | Checkout HEAD differs from GITHUB_SHA | Reject provenance mismatch. |
+| FXC unavailable | Fail toolchain preparation before the long native build. |
+| Runtime HLSL path remains, generated bindings are ambiguous/missing, or any expected DXBC array is not embedded | Reject portable artifact before upload. |
 | Probe fails, hangs, returns another channel/architecture/schema | Fail within bounded subprocess timeout; no artifact upload. |
 | TUI version differs from package.json | Reject mixed binaries. |
 | Windows PDFium review changes | Stop for payload review. |
@@ -71,12 +86,16 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   output must be rejected. No local Rust rebuild is required for script edits.
 - The first cloud run must build with `--locked` and pass package probes.
   Local visual acceptance is a separate recorded step after artifact download.
+- Run `node scripts/check-development-windows-shaders.test.mjs`: embedded
+  arrays pass; missing/malformed arrays, absent executable bytecode and both
+  encodings of runtime source/output paths fail. Confirm a previously broken
+  debug executable fails this gate without launching it or rebuilding locally.
 
 ## 7. Wrong vs Correct
 
-Wrong: set `VIBEX_INSTALL_PACKAGE` only during compilation, launch against the
-default home, and report the compiled probe as GUI acceptance.
+Wrong: disable debug symbols only, treat `--probe` as renderer initialization,
+and ship a debug EXE that still loads HLSL from the build runner's directories.
 
-Correct: preserve the runtime environment through the launcher, use a separate
-development home shared by Desktop/TUI, and report cloud contract checks and
-local GUI acceptance as independent evidence.
+Correct: disable debug assertions in both the library and build script, require
+FXC, inspect embedded shader bytes before upload, preserve the launcher runtime
+environment and report local GUI acceptance separately.
