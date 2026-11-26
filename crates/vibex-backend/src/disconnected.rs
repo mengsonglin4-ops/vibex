@@ -372,6 +372,38 @@ impl FileBackend for DisconnectedBackend {
 }
 
 impl GitBackend for DisconnectedBackend {
+    fn model_review_choices(&self) -> BackendFuture<'_, Vec<vibex_core::ModelReviewTarget>> {
+        disconnected_future!()
+    }
+
+    fn preview_model_review(
+        &self,
+        _session: VibexSessionId,
+        _workspace: WorkspaceId,
+        _selection: Vec<GitDiffRequest>,
+        _target: vibex_core::ModelReviewTarget,
+    ) -> BackendFuture<'_, crate::ModelReviewPreview> {
+        disconnected_future!()
+    }
+
+    fn send_model_review(
+        &self,
+        _session: VibexSessionId,
+        _workspace: WorkspaceId,
+        _ticket: vibex_core::RequestId,
+    ) -> BackendFuture<'_, ()> {
+        disconnected_future!()
+    }
+
+    fn cancel_model_review(
+        &self,
+        _session: VibexSessionId,
+        _workspace: WorkspaceId,
+        _ticket: vibex_core::RequestId,
+    ) -> BackendFuture<'_, ()> {
+        disconnected_future!()
+    }
+
     fn git_status(&self, _workspace_id: WorkspaceId) -> BackendFuture<'_, GitStatusSummary> {
         disconnected_future!()
     }
@@ -1881,6 +1913,36 @@ mod tests {
                 .subscribe_browser_frames(BrowserTabId::new(), 0),
             Err(error) if error.code == "remote_runtime_not_configured"
         ));
+    }
+
+    #[test]
+    fn disconnected_review_never_falls_back_to_local_credentials() {
+        let facade = DisconnectedBackend::facade();
+        let backend = facade.git();
+        let session = VibexSessionId::new();
+        let workspace = WorkspaceId::new();
+        let ticket = vibex_core::RequestId::new();
+        let target = vibex_core::ModelReviewTarget {
+            provider_id: vibex_core::ModelProviderProfileId::new(),
+            provider_name: "offline".into(),
+            model_id: "not-called".into(),
+            revision: 1,
+        };
+        for error in [
+            block_on(backend.model_review_choices()).err(),
+            block_on(backend.preview_model_review(
+                session.clone(),
+                workspace.clone(),
+                vec![],
+                target,
+            ))
+            .err(),
+            block_on(backend.send_model_review(session.clone(), workspace.clone(), ticket.clone()))
+                .err(),
+            block_on(backend.cancel_model_review(session, workspace, ticket)).err(),
+        ] {
+            assert_eq!(error.unwrap().kind, crate::BackendErrorKind::Offline);
+        }
     }
 
     /// Minimal executor so the disconnected seam can be asserted without

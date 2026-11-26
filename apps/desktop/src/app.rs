@@ -49787,6 +49787,25 @@ impl VibexWorkbench {
         self.registered_session(selected.as_str())
     }
 
+    pub(crate) fn model_review_session(
+        &self,
+        workspace: &vibex_core::WorkspaceId,
+    ) -> Option<VibexSessionId> {
+        if self.new_session_open
+            || self.ui_state.workbench.selected_workspace_id.as_deref() != Some(workspace.as_str())
+        {
+            return None;
+        }
+        self.selected_session()
+            .filter(|session| {
+                !session.is_terminal()
+                    && session.archived_at_ms.is_none()
+                    && session.workspace_mode == vibex_core::WorkspaceMode::CurrentCheckout
+                    && &session.workspace_id == workspace
+            })
+            .map(|session| session.id.clone())
+    }
+
     /// The Agent that owns a session.
     ///
     /// The embedded browser's tab strip names the Agent session behind a page
@@ -74772,7 +74791,15 @@ impl VibexWorkbench {
             TimelineRowKind::GitNotice
             | TimelineRowKind::SystemNotice
             | TimelineRowKind::PermissionResolution
-            | TimelineRowKind::ElicitationResolution => 24.0,
+            | TimelineRowKind::ElicitationResolution => {
+                if row.kind == TimelineRowKind::GitNotice
+                    && vibex_core::GitNoticePayload::is_model_review(&row.body)
+                {
+                    16.0 + estimated_wrapped_lines(&row.body, chars_per_line) as f32 * 20.0
+                } else {
+                    24.0
+                }
+            }
             TimelineRowKind::PermissionRequest => {
                 let Some(vibex_core::TimelinePayload::PermissionRequest(request)) = payload else {
                     return 24.0;
@@ -77967,6 +77994,18 @@ impl VibexWorkbench {
         row: &TimelineRow,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if row.kind == TimelineRowKind::GitNotice
+            && vibex_core::GitNoticePayload::is_model_review(&row.body)
+        {
+            return div()
+                .w_full()
+                .min_w_0()
+                .py_2()
+                .text_sm()
+                .line_height(px(20.0))
+                .child(self.session_search_highlighted_row_text(row, row.body.clone(), cx))
+                .into_any_element();
+        }
         // Codex-parity: notices render as a single muted icon line.
         let icon = match row.kind {
             TimelineRowKind::GitNotice => Icon::default().path("icons/vibex/git-branch.svg"),

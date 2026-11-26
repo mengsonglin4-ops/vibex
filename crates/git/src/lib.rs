@@ -21,6 +21,91 @@ use vibex_core::{
 
 mod identity;
 pub use identity::*;
+#[cfg(windows)]
+mod review_extract;
+mod review_snapshot;
+pub use review_snapshot::{ReviewSnapshot, ReviewSnapshotError};
+
+#[cfg(not(windows))]
+pub fn model_review_snapshot(
+    _: impl AsRef<Path>,
+    _: &WorkspaceId,
+    _: &[GitDiffRequest],
+) -> VibexResult<String> {
+    Err(VibexError::validation(
+        "git_review_unavailable",
+        "Model review supports Windows workspaces only.",
+    ))
+}
+
+#[cfg(windows)]
+pub fn model_review_snapshot(
+    repo_path: impl AsRef<Path>,
+    workspace: &WorkspaceId,
+    selection: &[GitDiffRequest],
+) -> VibexResult<String> {
+    if selection.is_empty() || selection.len() > review_snapshot::MAX_PARTS {
+        return Err(VibexError::validation(
+            "git_review_selection",
+            "Select between 1 and 32 file sides.",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for request in selection {
+        if &request.workspace_id != workspace
+            || !review_extract::valid_path(&request.path)
+            || !seen.insert((&request.path, request.staged))
+        {
+            return Err(VibexError::validation(
+                "git_review_selection",
+                "Review requires unique, literal file sides in this workspace.",
+            ));
+        }
+    }
+    let parts = review_extract::extract(
+        repo_path.as_ref(),
+        selection
+            .iter()
+            .map(|item| (item.path.as_str(), item.staged)),
+    )
+    .map_err(|message| VibexError::validation("git_review_unavailable", message))?;
+    ReviewSnapshot::freeze(
+        workspace.as_str(),
+        selection
+            .iter()
+            .zip(&parts)
+            .map(|(item, diff)| review_snapshot::Part {
+                workspace: workspace.as_str(),
+                path: &item.path,
+                staged: item.staged,
+                diff,
+                truncated: false,
+            }),
+    )
+    .map(|snapshot| snapshot.text().to_owned())
+    .map_err(|_| {
+        VibexError::validation(
+            "git_review_invalid_snapshot",
+            "The complete selected text patches do not fit a review snapshot.",
+        )
+    })
+}
+
+pub fn freeze_review_diffs(
+    workspace: &WorkspaceId,
+    selected: &[GitDiffResponse],
+) -> Result<ReviewSnapshot, ReviewSnapshotError> {
+    ReviewSnapshot::freeze(
+        workspace.as_str(),
+        selected.iter().map(|part| review_snapshot::Part {
+            workspace: part.workspace_id.as_str(),
+            path: &part.path,
+            staged: part.staged,
+            diff: &part.diff,
+            truncated: part.truncated,
+        }),
+    )
+}
 
 const MAX_DIFF_BYTES: usize = 512 * 1024;
 const MAX_HISTORY_LIMIT: u32 = 100;
@@ -2991,6 +3076,35 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let err = git_status(temp_dir).unwrap_err();
         assert_eq!(err.code, "not_git_repository");
+    }
+
+    #[test]
+    fn freeze_review_uses_the_selected_workspace_and_staging_side() {
+        let root = temp_repo("peer-review");
+        std::fs::create_dir_all(&root).unwrap();
+        init_test_repo(&root);
+        let path = "样例 文件.txt";
+        std::fs::write(root.join(path), "index\n").unwrap();
+        run_raw(&root, &["add", "--", path]).unwrap();
+        std::fs::write(root.join(path), "working\n").unwrap();
+        let workspace = WorkspaceId::new();
+        let staged = diff(
+            &root,
+            &GitDiffRequest {
+                workspace_id: workspace.clone(),
+                path: path.into(),
+                staged: true,
+            },
+        )
+        .unwrap();
+        let selected = [staged];
+        let snapshot = freeze_review_diffs(&workspace, &selected).unwrap();
+        assert!(snapshot.text().contains("+index"));
+        assert!(!snapshot.text().contains("working"));
+        assert_eq!(
+            freeze_review_diffs(&WorkspaceId::new(), &selected).err(),
+            Some(ReviewSnapshotError::WrongWorkspace)
+        );
     }
 
     #[test]

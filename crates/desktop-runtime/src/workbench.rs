@@ -134,6 +134,16 @@ impl GitHandle {
         vibex_git::diff(&workspace.root_path, request)
     }
 
+    pub fn model_review_snapshot(
+        &self,
+        workspace: &WorkspaceId,
+        selection: &[GitDiffRequest],
+    ) -> VibexResult<String> {
+        let connection = open_database(&self.db_path)?;
+        let record = workspace_record(&connection, workspace)?.1;
+        vibex_git::model_review_snapshot(&record.root_path, workspace, selection)
+    }
+
     pub fn history(&self, request: &GitHistoryRequest) -> VibexResult<GitHistoryResponse> {
         let connection = open_database(&self.db_path)?;
         let workspace = workspace_record(&connection, &request.workspace_id)?.1;

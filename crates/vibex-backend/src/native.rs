@@ -1695,6 +1695,53 @@ impl FileBackend for NativeBackend {
 }
 
 impl GitBackend for NativeBackend {
+    fn model_review_choices(&self) -> BackendFuture<'_, Vec<vibex_core::ModelReviewTarget>> {
+        Box::pin(async move { Ok(self.runtime.model_review_choices().await?) })
+    }
+
+    fn preview_model_review(
+        &self,
+        session: VibexSessionId,
+        workspace: WorkspaceId,
+        selection: Vec<GitDiffRequest>,
+        target: vibex_core::ModelReviewTarget,
+    ) -> BackendFuture<'_, crate::ModelReviewPreview> {
+        Box::pin(async move {
+            let (ticket, text) = self
+                .runtime
+                .preview_model_review(session, workspace, selection, target)
+                .await?;
+            Ok(crate::ModelReviewPreview { ticket, text })
+        })
+    }
+
+    fn send_model_review(
+        &self,
+        session: VibexSessionId,
+        workspace: WorkspaceId,
+        ticket: vibex_core::RequestId,
+    ) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            Ok(self
+                .runtime
+                .send_model_review(session, workspace, ticket)
+                .await?)
+        })
+    }
+
+    fn cancel_model_review(
+        &self,
+        session: VibexSessionId,
+        workspace: WorkspaceId,
+        ticket: vibex_core::RequestId,
+    ) -> BackendFuture<'_, ()> {
+        Box::pin(async move {
+            Ok(self
+                .runtime
+                .cancel_model_review(session, workspace, ticket)?)
+        })
+    }
+
     fn git_status(&self, workspace_id: WorkspaceId) -> BackendFuture<'_, GitStatusSummary> {
         let runtime = self.runtime.clone();
         Box::pin(async move {

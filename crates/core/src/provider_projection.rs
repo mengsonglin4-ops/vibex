@@ -21,6 +21,15 @@ use crate::{
 };
 
 pub const PROVIDER_PROJECTION_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelReviewTarget {
+    pub provider_id: ModelProviderProfileId,
+    pub provider_name: String,
+    pub model_id: String,
+    pub revision: i64,
+}
+
 pub const WIRE_PROTOCOL_OPENAI_RESPONSES: &str = "openai_responses";
 pub const WIRE_PROTOCOL_OPENAI_CHAT_COMPLETIONS: &str = "openai_chat_completions";
 pub const WIRE_PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropic_messages";

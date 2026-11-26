@@ -7,12 +7,59 @@ use vibex_core::{
     GitWorktreeCreateResult, GitWorktreeDestructivePreflight, GitWorktreeDiscardRequest,
     GitWorktreeLifecycleSnapshot, GitWorktreeMergePlan, GitWorktreeMergeRequest,
     GitWorktreeOperationRecord, GitWorktreeOperationRequest, GitWorktreeReadinessRecord,
-    GitWorktreeReadinessRequest, GitWorktreeRestoreRequest, WorkspaceId,
+    GitWorktreeReadinessRequest, GitWorktreeRestoreRequest, ModelReviewTarget, RequestId,
+    VibexSessionId, WorkspaceId,
 };
 
 use crate::{BackendBound, BackendFuture, MutationRequest};
 
+pub struct ModelReviewPreview {
+    pub ticket: RequestId,
+    pub text: String,
+}
+
+fn review_unavailable<'a, T: 'a>() -> BackendFuture<'a, T> {
+    Box::pin(async {
+        Err(crate::BackendError::unsupported(
+            "model_review_unavailable",
+            "Model review is available only on the connected local desktop backend",
+        ))
+    })
+}
+
 pub trait GitBackend: BackendBound {
+    fn model_review_choices(&self) -> BackendFuture<'_, Vec<ModelReviewTarget>> {
+        review_unavailable()
+    }
+
+    fn preview_model_review(
+        &self,
+        _session: VibexSessionId,
+        _workspace: WorkspaceId,
+        _selection: Vec<GitDiffRequest>,
+        _target: ModelReviewTarget,
+    ) -> BackendFuture<'_, ModelReviewPreview> {
+        review_unavailable()
+    }
+
+    fn send_model_review(
+        &self,
+        _session: VibexSessionId,
+        _workspace: WorkspaceId,
+        _ticket: RequestId,
+    ) -> BackendFuture<'_, ()> {
+        review_unavailable()
+    }
+
+    fn cancel_model_review(
+        &self,
+        _session: VibexSessionId,
+        _workspace: WorkspaceId,
+        _ticket: RequestId,
+    ) -> BackendFuture<'_, ()> {
+        review_unavailable()
+    }
+
     fn git_status(&self, workspace_id: WorkspaceId) -> BackendFuture<'_, GitStatusSummary>;
 
     fn git_diff(&self, request: GitDiffRequest) -> BackendFuture<'_, GitDiffResponse>;

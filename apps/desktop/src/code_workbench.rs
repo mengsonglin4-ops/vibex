@@ -113,6 +113,8 @@ use crate::spinner::Spinner;
 use crate::terminal_surface::TerminalSurface;
 use crate::theme;
 
+mod model_review;
+
 const FILE_ROW_HEIGHT: f32 = 28.0;
 const FILE_TREE_INDENT: f32 = 20.0;
 const FILE_TREE_GUIDE_OFFSET: f32 = 16.0;
@@ -13401,6 +13403,8 @@ impl Render for PreviewWindowHost {
 
 pub struct CodeRightRail {
     workbench: Entity<CodeWorkbench>,
+    model_review: Option<model_review::ModelReview>,
+    model_review_eligible: Option<bool>,
     projection: CodeRightRailProjection,
     file_search_input: Entity<InputState>,
     file_search_mode: FileSearchMode,
@@ -13499,6 +13503,7 @@ impl CodeRightRail {
         history_date_picker.update(cx, |picker, cx| picker.set_date(initial_date, window, cx));
         let workbench_subscription =
             cx.observe_in(&workbench, window, |this, workbench, window, cx| {
+                this.sync_model_review_context(cx);
                 let previous_workspace_generation = this.projection.revision.workspace_generation;
                 let next = {
                     let workbench = workbench.read(cx);
@@ -13621,8 +13626,17 @@ impl CodeRightRail {
         // stalling on the frame the panel opens.
         cx.background_spawn(async move { warm_external_open_tools() })
             .detach();
+        let review_owner = workbench
+            .read(cx)
+            .parent
+            .as_ref()
+            .and_then(WeakEntity::upgrade);
+        let review_subscription = review_owner
+            .map(|owner| cx.observe(&owner, |this, _, cx| this.sync_model_review_context(cx)));
         Self {
             workbench,
+            model_review: None,
+            model_review_eligible: None,
             projection,
             file_search_input,
             file_search_mode: FileSearchMode::Name,
@@ -13665,7 +13679,10 @@ impl CodeRightRail {
                 history_author_subscription,
                 history_date_subscription,
                 file_tree_blur_subscription,
-            ],
+            ]
+            .into_iter()
+            .chain(review_subscription)
+            .collect(),
             #[cfg(test)]
             render_count: 0,
         }
@@ -16778,6 +16795,9 @@ impl CodeRightRail {
             );
         }
 
+        if self.model_review.is_some() {
+            return self.render_model_review(cx);
+        }
         let changes_active = mode == GitWorkbenchMode::Changes;
         let history_active = mode == GitWorkbenchMode::History;
         let lifecycle_fenced = lifecycle_view.as_ref().is_some_and(|view| {
@@ -17329,37 +17349,51 @@ impl CodeRightRail {
                     .bg(rail_surface(cx).opacity(0.95))
                     .p_3()
                     .child(
-                        h_flex().gap_2().mb_2().child(
-                            Button::new("toggle-amend")
-                                .small()
-                                .ghost()
-                                .compact()
-                                .tooltip(locale::text(
-                                    "Amend last commit",
-                                    "修正上次提交",
-                                    "修正上次提交",
-                                ))
-                                .child(git_selection_indicator(
-                                    if amend {
-                                        GitPathSelectionState::Checked
-                                    } else {
-                                        GitPathSelectionState::Unchecked
-                                    },
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().sidebar_foreground.opacity(0.70))
-                                        .child("amend"),
+                        h_flex()
+                            .gap_2()
+                            .mb_2()
+                            .when(self.model_review_eligible == Some(true), |row| {
+                                row.child(
+                                    Button::new("open-model-review")
+                                        .small()
+                                        .outline()
+                                        .label(locale::text("Model review", "模型审查", "模型審查"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_model_review(window, cx)
+                                        })),
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.update_workbench(cx, |workbench, cx| {
-                                        workbench.amend_commit = !workbench.amend_commit;
-                                        cx.notify();
-                                    })
-                                })),
-                        ),
+                            })
+                            .child(
+                                Button::new("toggle-amend")
+                                    .small()
+                                    .ghost()
+                                    .compact()
+                                    .tooltip(locale::text(
+                                        "Amend last commit",
+                                        "修正上次提交",
+                                        "修正上次提交",
+                                    ))
+                                    .child(git_selection_indicator(
+                                        if amend {
+                                            GitPathSelectionState::Checked
+                                        } else {
+                                            GitPathSelectionState::Unchecked
+                                        },
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().sidebar_foreground.opacity(0.70))
+                                            .child("amend"),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.update_workbench(cx, |workbench, cx| {
+                                            workbench.amend_commit = !workbench.amend_commit;
+                                            cx.notify();
+                                        })
+                                    })),
+                            ),
                     )
                     .child(
                         Textarea::new(&commit_message)
@@ -18697,6 +18731,9 @@ fn rail_surface(cx: &App) -> Hsla {
 
 impl Render for CodeRightRail {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.model_review_eligible.is_none() {
+            self.model_review_eligible = Some(self.eligible_for_model_review(cx));
+        }
         #[cfg(test)]
         {
             self.render_count = self.render_count.saturating_add(1);

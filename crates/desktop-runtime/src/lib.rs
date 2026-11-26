@@ -15,6 +15,7 @@ mod home_lock;
 mod im_channel;
 mod lan_pairing;
 mod management;
+mod model_review;
 pub mod network_proxy;
 mod rc_import;
 mod relay;
@@ -2920,6 +2921,7 @@ pub trait DesktopRuntimeFacade: Send + Sync {
 }
 
 pub struct DesktopRuntime {
+    model_reviews: model_review::ReviewStore,
     config: DesktopRuntimeConfig,
     app_update: AppUpdateService,
     agent: AgentHandle,
@@ -3472,6 +3474,7 @@ impl DesktopRuntime {
             ModelGatewayLimits::default(),
         );
         let runtime = Arc::new(Self {
+            model_reviews: Default::default(),
             config,
             app_update,
             agent,

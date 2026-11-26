@@ -1035,6 +1035,23 @@ pub struct GitNoticePayload {
     pub summary: String,
 }
 
+impl GitNoticePayload {
+    const MODEL_REVIEW_PREFIX: &'static str = "Model review: ";
+
+    pub fn model_review(provider: &str, model: &str, scope: &str, report: &str) -> Self {
+        Self {
+            summary: format!(
+                "{}{provider} / {model}\n{scope}\n\n{report}",
+                Self::MODEL_REVIEW_PREFIX
+            ),
+        }
+    }
+
+    pub fn is_model_review(summary: &str) -> bool {
+        summary.starts_with(Self::MODEL_REVIEW_PREFIX)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemNoticeLevel {
