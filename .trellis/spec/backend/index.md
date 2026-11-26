@@ -39,6 +39,7 @@ Read these files before backend work:
 | --- | --- |
 | [Directory Structure](./directory-structure.md) | Creating crates, services, adapters, commands, or API modules. |
 | [Rust Dependency Sources](./rust-dependency-sources.md) | Adding or updating Rust Git dependencies, lockfiles, license policy, or third-party source inputs. |
+| [Windows Development Builds](./windows-development-builds.md) | Changing cloud development builds, portable manifests, or isolated Windows launchers. |
 | [Agent Session Protocol](./agent-session-protocol.md) | Touching Agent sessions, timeline events, permissions, provider adapters, or live event sync. |
 | [Agent Usage Statistics](./agent-usage-statistics.md) | Touching ACP usage capture, execution facts, cumulative checkpoints, token aggregation, or typed Usage queries. |
 | [Vibex-use Contracts](./vibex-use.md) | Touching delegation, team access, execution results, context, recovery, event delivery, MCP transport, budgets, or shared team capabilities. |

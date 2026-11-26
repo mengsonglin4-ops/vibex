@@ -1,0 +1,91 @@
+name: Development Windows
+
+on:
+  push:
+    branches: [cloud-development]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: development-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  VIBEX_CHANNEL: preview
+  VIBEX_INSTALL_PACKAGE: unmanaged
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d # v4.1.0
+        with:
+          version: 11.3.0
+      - name: Prepare native toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $toolchain = (Select-String -Path rust-toolchain.toml -Pattern '^channel\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          if (-not $toolchain) { throw 'Missing pinned Rust toolchain' }
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsRoot = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsRoot) { throw 'Visual Studio C++ x64 tools are missing' }
+          $devShell = Join-Path $vsRoot 'Common7\Tools\Launch-VsDevShell.ps1'
+          & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          foreach ($key in @('Path', 'INCLUDE', 'LIB', 'LIBPATH', 'VCINSTALLDIR', 'VCToolsInstallDir', 'WindowsSdkDir')) {
+            $value = [Environment]::GetEnvironmentVariable($key, 'Process')
+            if ($value) { "$key=$value" >> $env:GITHUB_ENV }
+          }
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --yes --no-progress --limit-output
+            if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
+            $nasmDir = Join-Path $env:ProgramFiles 'NASM'
+            if (-not (Test-Path (Join-Path $nasmDir 'nasm.exe'))) { throw 'NASM executable is missing' }
+            $nasmDir >> $env:GITHUB_PATH
+          }
+          rustc --version
+          cargo --version
+      - name: Install locked source assets and check scripts
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          pnpm check:frontend
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend checks failed' }
+          node --check scripts/package-development-windows.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Packager syntax check failed' }
+          cargo metadata --locked --no-deps --format-version 1 > "$env:RUNNER_TEMP\vibex-metadata.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Locked workspace metadata failed' }
+      - name: Build desktop and terminal client
+        run: |
+          cargo build -p vibex-desktop -p vibex-client --locked --jobs 2
+          if ($LASTEXITCODE -ne 0) { throw 'Development build failed' }
+      - name: Package and probe portable executables
+        run: |
+          node scripts/package-development-windows.mjs --output target/development-artifact
+          if ($LASTEXITCODE -ne 0) { throw 'Portable package validation failed' }
+      # Deliberately upload an allowlisted payload, never target/ or a Cargo cache.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vibex-development-windows-x64
+          path: target/development-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
