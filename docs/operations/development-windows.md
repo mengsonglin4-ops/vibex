@@ -55,6 +55,14 @@ Desktop and TUI together without opening the installed application's home.
 It does not add anything to PATH or change an installed application's files.
 Launching the executable directly skips these development defaults.
 
+Relative `-DataRoot` paths resolve from the current PowerShell location. The
+launcher opens a visible, normal desktop window. This isolates the Vibex
+database and runtime home; it does not isolate the Windows credential store,
+`CODEX_HOME`, other Agent configuration directories, or inherited environment
+variables. Existing system credentials or Agent configuration may remain
+available. Use separately configured credentials and Agent homes when an
+acceptance run requires that additional isolation.
+
 Windows must provide its normal system libraries and compatible graphics
 drivers. A machine missing the Microsoft Visual C++ x64 runtime may need that
 runtime installed. Agent runtimes and credentials are configured locally by the

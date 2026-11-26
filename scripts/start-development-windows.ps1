@@ -4,7 +4,7 @@ param(
     [switch]$Tui
 )
 $ErrorActionPreference = 'Stop'
-$DataRoot = [IO.Path]::GetFullPath($DataRoot)
+$DataRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($DataRoot)
 New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
 # Desktop appends desktop-preview to VIBEX_DB_PATH's parent; the TUI consumes
 # VIBEX_HOME directly. Both must reach the same isolated development runtime.
@@ -19,4 +19,4 @@ if ($Tui) {
     & (Join-Path $PSScriptRoot 'vibex.exe')
     exit $LASTEXITCODE
 }
-Start-Process -FilePath (Join-Path $PSScriptRoot 'vibex-desktop.exe') -WorkingDirectory $PSScriptRoot -WindowStyle Hidden
+Start-Process -FilePath (Join-Path $PSScriptRoot 'vibex-desktop.exe') -WorkingDirectory $PSScriptRoot -WindowStyle Normal

@@ -25,6 +25,10 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   override is read at runtime, so the launcher also sets it.
 - Desktop preview derives `<parent of VIBEX_DB_PATH>/desktop-preview`; TUI reads
   `VIBEX_HOME` directly. The launcher points both at the same isolated home.
+- Resolve relative `DataRoot` through PowerShell's session-state path API,
+  rather than the process current directory. Launch the interactive GUI with
+  `WindowStyle Normal`. Database/home isolation does not isolate the system
+  credential store, `CODEX_HOME`, or other inherited Agent configuration.
 - Artifact `vibex-development-windows-x64`, retention 7 days; no target cache,
   installer, release, tag or user data. Only explicitly allowlisted files ship.
 - Manifest v1: integer `schemaVersion=1`, `project=vibex`, `repository`,
