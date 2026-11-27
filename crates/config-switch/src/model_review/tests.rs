@@ -17,7 +17,6 @@ const TEXT: &str = "Review exactly this:\r\n+\t\"quoted\" \\ \u{1f642}\n-  \n";
 
 struct Mock {
     listener: TcpListener,
-    pending: std::net::TcpListener,
     base: String,
 }
 
@@ -26,18 +25,16 @@ impl Mock {
         let pending = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         pending.set_nonblocking(true).unwrap();
         let base = format!("http://{}", pending.local_addr().unwrap());
-        let listener = TcpListener::from_std(pending.try_clone().unwrap()).unwrap();
-        Self {
-            listener,
-            pending,
-            base,
-        }
+        let listener = TcpListener::from_std(pending).unwrap();
+        Self { listener, base }
     }
 
-    fn assert_no_request(&self) {
-        assert_eq!(
-            self.pending.accept().unwrap_err().kind(),
-            ErrorKind::WouldBlock
+    async fn assert_no_request(&self) {
+        assert!(
+            timeout(Duration::from_millis(50), self.listener.accept())
+                .await
+                .is_err(),
+            "no connection may reach the mock during the observation window"
         );
     }
 
@@ -158,6 +155,27 @@ fn ok_json(body: Value) -> String {
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
+}
+
+#[tokio::test]
+async fn mock_no_request_returns_without_a_connection() {
+    timeout(Duration::from_secs(1), Mock::new().assert_no_request())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[should_panic(expected = "no connection may reach the mock during the observation window")]
+async fn mock_no_request_rejects_a_queued_connection() {
+    let mock = Mock::new();
+    let _stream = timeout(
+        Duration::from_secs(1),
+        TcpStream::connect(mock.listener.local_addr().unwrap()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    mock.assert_no_request().await;
 }
 
 #[test]
@@ -297,7 +315,7 @@ async fn only_the_confirmed_text_and_selected_model_reach_the_declared_endpoint(
             prepared.route.credential_id.as_ref(),
             Some(&profile.credentials[1].id)
         );
-        mock.assert_no_request();
+        mock.assert_no_request().await;
         let response = ok_json(reply);
         let (result, (request_line, headers, body)) = timeout(Duration::from_secs(5), async {
             tokio::join!(prepared.send(TEXT), mock.reply(&response))
@@ -312,8 +330,8 @@ async fn only_the_confirmed_text_and_selected_model_reach_the_declared_endpoint(
                 .any(|line| line.eq_ignore_ascii_case(&format!("authorization: Bearer {SECRET}")))
         );
         assert_eq!(body, expected);
-        mock.assert_no_request();
-        unused.assert_no_request();
+        mock.assert_no_request().await;
+        unused.assert_no_request().await;
     }
 }
 
@@ -372,8 +390,8 @@ async fn redirect_http_failure_invalid_text_and_oversized_bodies_are_terminal_an
         assert_eq!(error.code, expected_code);
         assert!(!format!("{error:?}").contains(SECRET));
         assert!(error.diagnostics.is_empty());
-        mock.assert_no_request();
-        unused.assert_no_request();
+        mock.assert_no_request().await;
+        unused.assert_no_request().await;
     }
 }
 
@@ -391,7 +409,11 @@ async fn stale_selection_revoked_key_and_disabled_model_never_connect() {
         .unwrap();
     assert!(service.model_review_choices().unwrap().is_empty());
     assert_eq!(
-        prepared.send(TEXT).await.unwrap_err().code,
+        timeout(Duration::from_secs(5), prepared.send(TEXT))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
         "model_review_credential_unavailable"
     );
     profile.configured_models[0].enabled = false;
@@ -403,7 +425,11 @@ async fn stale_selection_revoked_key_and_disabled_model_never_connect() {
         })
         .unwrap();
     assert_eq!(
-        pending.send(TEXT).await.unwrap_err().code,
+        timeout(Duration::from_secs(5), pending.send(TEXT))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
         "model_review_target_changed"
     );
     assert!(
@@ -414,7 +440,7 @@ async fn stale_selection_revoked_key_and_disabled_model_never_connect() {
             })
             .is_err()
     );
-    mock.assert_no_request();
+    mock.assert_no_request().await;
 }
 
 #[tokio::test]
@@ -450,7 +476,7 @@ async fn timeout_and_dropping_an_inflight_review_close_the_request() {
                     ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
                 ))
         );
-        mock.assert_no_request();
+        mock.assert_no_request().await;
     }
 }
 
@@ -493,7 +519,7 @@ async fn review_timeout_covers_a_stalled_body_after_headers() {
                 ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
             ))
     );
-    mock.assert_no_request();
+    mock.assert_no_request().await;
 }
 
 #[test]
@@ -549,26 +575,42 @@ fn legacy_codex_wire_pin_selects_the_configured_base_without_an_agent() {
 
 #[tokio::test]
 async fn a_missing_secret_cannot_fall_through_to_another_key_or_anonymous_request() {
+    eprintln!("[model-review] missing-secret: creating loopback listener");
     let mock = Mock::new();
+    eprintln!("[model-review] missing-secret: storing synthetic credentials");
     let mut config = profile(&mock.base, WIRE_PROTOCOL_OPENAI_RESPONSES);
     config.credentials.push(credential(MODEL));
+    eprintln!("[model-review] missing-secret: creating isolated database fixture");
     let (_dir, service, profile, target) = fixture(config);
+    eprintln!("[model-review] missing-secret: preparing selected route");
     let prepared = service.prepare_model_review(&target).unwrap();
     let secret = profile.credentials[1]
         .credential
         .secret_reference()
         .unwrap();
     crate::secrets::delete_provider_secret(&secret.lookup_key).unwrap();
+    eprintln!("[model-review] missing-secret: checking revoked prepared route");
     assert_eq!(
-        prepared.send(TEXT).await.unwrap_err().code,
+        timeout(Duration::from_secs(5), prepared.send(TEXT))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
         "model_review_credential_unavailable"
     );
     let preview_without_secret = service.prepare_model_review(&target).unwrap();
+    eprintln!("[model-review] missing-secret: checking new preview without secret");
     assert_eq!(
-        preview_without_secret.send(TEXT).await.unwrap_err().code,
+        timeout(Duration::from_secs(5), preview_without_secret.send(TEXT))
+            .await
+            .unwrap()
+            .unwrap_err()
+            .code,
         "model_review_credential_unavailable"
     );
-    mock.assert_no_request();
+    eprintln!("[model-review] missing-secret: checking no connection");
+    mock.assert_no_request().await;
+    eprintln!("[model-review] missing-secret: completed");
 }
 
 #[test]

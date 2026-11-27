@@ -7393,6 +7393,11 @@ cargo test --locked -p vibex-config-switch --no-default-features --test model_re
   HTTP tests use a short timeout and bound the client future for both missing
   headers and a stalled body. Server write-error timestamps do not measure the
   time at which a client timed out.
+- No-connection assertions use the same Tokio listener as the HTTP mock with
+  a bounded async observation window, not a synchronous accept on a cloned
+  socket. Cover both an idle listener and an already queued connection. Bound
+  negative send futures too; a process-level CI deadline must still guard
+  synchronous setup and blocking-task shutdown that async timers cannot stop.
 - Run the credential integration target alone without `os-keychain`. The
   dependency library is compiled without `cfg(test)` and uses a fresh HostFile
   directory and synthetic keys. Verify store/read/delete, Bearer auth, exact

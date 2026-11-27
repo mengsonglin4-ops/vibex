@@ -1,4 +1,4 @@
-use std::{io::ErrorKind, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
 use serde_json::{Value, json};
 use tokio::{
@@ -33,7 +33,6 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Mock {
     listener: TcpListener,
-    pending: std::net::TcpListener,
     base: String,
 }
 
@@ -42,18 +41,15 @@ impl Mock {
         let pending = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         pending.set_nonblocking(true).unwrap();
         let base = format!("http://{}", pending.local_addr().unwrap());
-        let listener = TcpListener::from_std(pending.try_clone().unwrap()).unwrap();
-        Self {
-            listener,
-            pending,
-            base,
-        }
+        let listener = TcpListener::from_std(pending).unwrap();
+        Self { listener, base }
     }
 
-    fn assert_no_request(&self) {
-        assert_eq!(
-            self.pending.accept().unwrap_err().kind(),
-            ErrorKind::WouldBlock,
+    async fn assert_no_request(&self) {
+        assert!(
+            timeout(Duration::from_millis(50), self.listener.accept())
+                .await
+                .is_err(),
             "a preview, rejected send, or completed request must not open another connection"
         );
     }
@@ -122,7 +118,7 @@ impl Mock {
         })
         .await
         .expect("the loopback request and mock response must finish within five seconds");
-        self.assert_no_request();
+        self.assert_no_request().await;
         result
     }
 }
@@ -295,7 +291,7 @@ async fn model_review_credentials_use_host_file_and_fail_closed_after_preview() 
         };
         assert!(service.model_review_choices().unwrap().contains(&target));
         let prepared = service.prepare_model_review(&target).unwrap();
-        mock.assert_no_request();
+        mock.assert_no_request().await;
         assert_eq!(
             mock.exchange(
                 prepared,
@@ -343,14 +339,14 @@ async fn model_review_credentials_use_host_file_and_fail_closed_after_preview() 
             .unwrap()
             .unwrap_err();
         assert_redacted(&error, "model_review_credential_unavailable");
-        mock.assert_no_request();
+        mock.assert_no_request().await;
         let prepared_without_secret = service.prepare_model_review(&target).unwrap();
         let error = timeout(IO_TIMEOUT, prepared_without_secret.send(TEXT))
             .await
             .unwrap()
             .unwrap_err();
         assert_redacted(&error, "model_review_credential_unavailable");
-        mock.assert_no_request();
+        mock.assert_no_request().await;
 
         store_provider_secret(selected_key, SECRET).unwrap();
         assert_eq!(resolve(selected_key).as_deref(), Some(SECRET));
@@ -369,8 +365,8 @@ async fn model_review_credentials_use_host_file_and_fail_closed_after_preview() 
             .unwrap()
             .unwrap_err();
         assert_redacted(&error, "model_review_target_changed");
-        mock.assert_no_request();
-        replacement.assert_no_request();
+        mock.assert_no_request().await;
+        replacement.assert_no_request().await;
         let updated_target = ModelReviewTarget {
             revision: updated.revision,
             ..target
@@ -389,7 +385,7 @@ async fn model_review_credentials_use_host_file_and_fail_closed_after_preview() 
                 .unwrap(),
             "review recovered"
         );
-        mock.assert_no_request();
+        mock.assert_no_request().await;
     }
 
     for credential in &credentials {

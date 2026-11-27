@@ -13,6 +13,7 @@ installer/update policy remain separate.
   push.branches = [cloud-development]; workflow_dispatch
 cargo build -p vibex-desktop -p vibex-client --locked --jobs 2
 node scripts/package-development-windows.mjs --output <new-directory> [--binary-dir <debug-directory>]
+node scripts/run-model-review-tests.mjs --suite <git|config|credentials|runtime|backend|desktop> --phase <compile|test>
 Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 ```
 
@@ -29,16 +30,21 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   absolute Cargo source/output HLSL paths; its non-debug renderer embeds FXC
   bytes generated only when its build script also has debug assertions off.
   Require the Windows SDK `fxc.exe` and set `GPUI_FXC_PATH` explicitly.
-- Before building the portable executables, run the six model-review Cargo
-  suites listed below with `--locked`. Discover each suite with `-- --list
-  --format terse`, require at least one test, then run the same selection with
-  `-- --test-threads=1 --format terse`. Require a successful exit and exactly
+- Before building the portable executables, run the six model-review suites
+  listed below, each in separate compile and test workflow steps. Compile with
+  `cargo test --locked --no-run --message-format=json`, identify the unique
+  requested test executable from Cargo artifacts, and record its suite, source
+  HEAD and target directory. Test the recorded executable directly, without
+  another Cargo compile: list matching tests with `--list --format terse`,
+  require at least one, then run with `--test-threads=1 --format pretty --nocapture`
+  so a stalled test remains identifiable in the live log.
+  Require a successful exit and exactly
   one successful summary with no ignored tests and a passed count equal to
   discovery. A missing target, empty filter, ignored test or failing suite
   blocks the subsequent build, packaging and upload steps.
-- Keep the test step's `CARGO_TARGET_DIR` at
-  `${{ runner.temp }}/vibex-model-review-target`, separate from the portable
-  build's `target/`. Set `CARGO_PROFILE_TEST_DEBUG=0`,
+- Keep the test step's `CARGO_TARGET_DIR` at `target/review-tests`, selected by
+  `VIBEX_REVIEW_TEST_TARGET`, separate from portable build output at
+  `target/preview`. Set `CARGO_PROFILE_TEST_DEBUG=0`,
   `CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false` and
   `CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG_ASSERTIONS=false`; keep the dev
   profile controls above. Desktop tests enable GPUI `test-support`, so matching
@@ -46,6 +52,21 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   The packager searches `<binary-dir>/build/gpui-fast-windows-*/out/shaders_bytes.rs`
   and requires exactly one match. Never point it at the test target or copy test
   build outputs into the portable build directory.
+- Test compilation overrides `profile.test.package."*".opt-level=0` through
+  Cargo configuration so correctness tests do not inherit the desktop's costly
+  dependency optimization. The Preview build retains the repository's normal
+  dev dependency optimization. This is not a performance-test profile.
+- The runner reports phase duration and a heartbeat during long subprocesses.
+  Test execution is hard-bounded to 180 seconds by default; workflow test steps
+  allow five minutes including discovery and shutdown. Compilation has separate
+  step limits (15/15/10/30/10/30 minutes for the suites in order), with a
+  45-minute Preview build limit and the existing 120-minute overall limit.
+- Restore Rust dependencies and build caches only after toolchain setup, using
+  the pinned rust-cache action. Cache the two target directories separately and
+  exclude Cargo binaries. Keys include the lockfile, toolchain, workflow,
+  runner script, compiler environment and platform. Save completed dependency
+  work on failure; a restored cache never skips a regression or package gate.
+  Keep caches separate from downloadable Preview artifacts and runtime data.
 - Desktop preview derives `<parent of VIBEX_DB_PATH>/desktop-preview`; TUI reads
   `VIBEX_HOME` directly. The launcher points both at the same isolated home.
 - Resolve relative `DataRoot` through PowerShell's session-state path API,
@@ -80,6 +101,8 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 | Checkout HEAD differs from GITHUB_SHA | Reject provenance mismatch. |
 | FXC unavailable | Fail toolchain preparation before the long native build. |
 | A model-review suite fails discovery/execution, lists no tests, ignores tests, or runs a different count | Fail before building, packaging or uploading portable executables. |
+| Recorded test artifact belongs to another HEAD, suite or target, or does not exist | Reject before executing it. |
+| Test subprocess exceeds its deadline | Stop its process tree and fail the suite. |
 | Runtime HLSL path remains, generated bindings are ambiguous/missing, or any expected DXBC array is not embedded | Reject portable artifact before upload. |
 | Probe fails, hangs, returns another channel/architecture/schema | Fail within bounded subprocess timeout; no artifact upload. |
 | TUI version differs from package.json | Reject mixed binaries. |
@@ -120,6 +143,10 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   path without the unit-test in-memory secret store or OS keychain access.
 - Parse workflow YAML and PowerShell, `node --check` the packager, and run
   `pnpm check:frontend` for changed build tooling.
+- Run `node --test scripts/run-model-review-tests.test.mjs` to cover artifact
+  selection, non-empty discovery, summary/count checks, subprocess failure,
+  timeout and stale or missing manifests. Unit tests use fixtures, not a native
+  Cargo rebuild. The first cloud run must independently prove the real suites.
 - Validate a real portable package against already built Windows binaries;
   verify all listed hashes and paths. A corrupt PE input and pre-existing
   output must be rejected. No local Rust rebuild is required for script edits.
