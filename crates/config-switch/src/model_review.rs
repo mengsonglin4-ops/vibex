@@ -63,7 +63,8 @@ impl Wire {
                 };
                 let message = &choice["message"];
                 if message["role"] != "assistant"
-                    || !message["tool_calls"].is_null()
+                    || !(message["tool_calls"].is_null()
+                        || message["tool_calls"].as_array().is_some_and(Vec::is_empty))
                     || !message["function_call"].is_null()
                     || !message["refusal"].is_null()
                     || (!choice["finish_reason"].is_null() && choice["finish_reason"] != "stop")

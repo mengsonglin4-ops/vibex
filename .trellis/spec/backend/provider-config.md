@@ -7337,3 +7337,72 @@ ModelCatalogStatus { availability: Fresh|Stale|Bundled|Missing, fetched_at_ms? }
 - A source tile shows one badge derived from its shape: Plan, Region, Local,
   or Official. The badge is separate from the three category chips and never
   becomes a fourth category.
+
+## Scenario: Confirmed Git Model Review Responses
+
+### 1. Scope / Trigger
+
+Applies to the direct, tool-free model review client in
+`crates/config-switch/src/model_review.rs`, not the model gateway or ACP turns.
+
+### 2. Signatures
+
+```text
+ProviderConfigService::prepare_model_review(&ModelReviewTarget)
+PreparedModelReview::send(self, text: &str) -> VibexResult<String>
+cargo test --locked -p vibex-config-switch --lib model_review
+cargo test --locked -p vibex-config-switch --no-default-features --test model_review_credentials
+```
+
+### 3. Contracts
+
+- Chat text may omit `tool_calls`, set it to null, or provide an empty array.
+  A non-empty array or any other JSON type is not a text-only review.
+- Existing refusal, function-call, finish-status, text and size checks remain
+  mandatory. Accepting an empty tool array must not enable tools.
+- Connect timeout defaults to and is capped at 10 seconds; total HTTP request
+  timeout defaults to and is capped at 120 seconds. Explicit zero is invalid.
+  The request timeout covers reading the response body as well as headers.
+- Prepared routes are rechecked before sending. Missing selected secrets or
+  changed configurations fail without using another key or endpoint.
+
+### 4. Validation & Error Matrix
+
+| Input or event | Required result |
+| --- | --- |
+| Complete assistant text with missing/null/empty-array tool_calls | Return text. |
+| Non-empty or wrong-type tool_calls, refusal, incomplete or malformed reply | `model_review_invalid_response`. |
+| Headers arrive but the body stalls past the request timeout | `model_review_timeout`; no retry. |
+| Selected secret removed after preview | `model_review_credential_unavailable`; no connection or fallback. |
+| Provider configuration updated after preview | `model_review_target_changed`; neither endpoint receives a request. |
+| Error body or successful text contains the synthetic key | Error output does not contain the key or upstream error body. |
+
+### 5. Good / Base / Bad Cases
+
+- Good: a Chat-compatible provider returns plain assistant text and an empty
+  tool array; the confirmed report is accepted.
+- Base: the endpoint omits the tool field and returns a complete text reply.
+- Bad: treat every non-null tool field as an invocation, or allow a non-empty
+  array while claiming the response is tool-free.
+
+### 6. Tests Required
+
+- Parser regressions cover absent/null/empty/non-empty/wrong-type tool fields,
+  refusals, incomplete responses, malformed JSON and empty text.
+- Route tests assert timeout defaults, clamping and zero rejection. Loopback
+  HTTP tests use a short timeout and bound the client future for both missing
+  headers and a stalled body. Server write-error timestamps do not measure the
+  time at which a client timed out.
+- Run the credential integration target alone without `os-keychain`. The
+  dependency library is compiled without `cfg(test)` and uses a fresh HostFile
+  directory and synthetic keys. Verify store/read/delete, Bearer auth, exact
+  bodies, redaction, revocation, configuration changes and explicit recovery.
+  This does not validate an OS keychain, real account or paid provider.
+
+### 7. Wrong vs Correct
+
+Wrong: count a unit-test in-memory secret map as production credential I/O, or
+use the mock's delayed write failure as a measured client deadline.
+
+Correct: exercise the real HostFile backend in an isolated integration process
+and time completion of the production HTTP future directly.

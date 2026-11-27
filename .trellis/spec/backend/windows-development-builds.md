@@ -29,6 +29,23 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   absolute Cargo source/output HLSL paths; its non-debug renderer embeds FXC
   bytes generated only when its build script also has debug assertions off.
   Require the Windows SDK `fxc.exe` and set `GPUI_FXC_PATH` explicitly.
+- Before building the portable executables, run the six model-review Cargo
+  suites listed below with `--locked`. Discover each suite with `-- --list
+  --format terse`, require at least one test, then run the same selection with
+  `-- --test-threads=1 --format terse`. Require a successful exit and exactly
+  one successful summary with no ignored tests and a passed count equal to
+  discovery. A missing target, empty filter, ignored test or failing suite
+  blocks the subsequent build, packaging and upload steps.
+- Keep the test step's `CARGO_TARGET_DIR` at
+  `${{ runner.temp }}/vibex-model-review-target`, separate from the portable
+  build's `target/`. Set `CARGO_PROFILE_TEST_DEBUG=0`,
+  `CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false` and
+  `CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG_ASSERTIONS=false`; keep the dev
+  profile controls above. Desktop tests enable GPUI `test-support`, so matching
+  profile settings alone cannot guarantee one shader binding directory.
+  The packager searches `<binary-dir>/build/gpui-fast-windows-*/out/shaders_bytes.rs`
+  and requires exactly one match. Never point it at the test target or copy test
+  build outputs into the portable build directory.
 - Desktop preview derives `<parent of VIBEX_DB_PATH>/desktop-preview`; TUI reads
   `VIBEX_HOME` directly. The launcher points both at the same isolated home.
 - Resolve relative `DataRoot` through PowerShell's session-state path API,
@@ -62,6 +79,7 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 | Missing/invalid x64 executable or license input | Fail before creating output. |
 | Checkout HEAD differs from GITHUB_SHA | Reject provenance mismatch. |
 | FXC unavailable | Fail toolchain preparation before the long native build. |
+| A model-review suite fails discovery/execution, lists no tests, ignores tests, or runs a different count | Fail before building, packaging or uploading portable executables. |
 | Runtime HLSL path remains, generated bindings are ambiguous/missing, or any expected DXBC array is not embedded | Reject portable artifact before upload. |
 | Probe fails, hangs, returns another channel/architecture/schema | Fail within bounded subprocess timeout; no artifact upload. |
 | TUI version differs from package.json | Reject mixed binaries. |
@@ -79,6 +97,27 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 
 ## 6. Tests Required
 
+- The Windows development workflow runs these selections, each prefixed with
+  `cargo test --locked` and using the discovery/execution checks above:
+
+  | Cargo selection | Scope |
+  | --- | --- |
+  | `-p vibex-git --lib review` | Frozen snapshots, selected staging sides and Windows guarded Git extraction. |
+  | `-p vibex-config-switch --lib model_review` | Provider configuration and local HTTP model-review request/response behavior. |
+  | `-p vibex-config-switch --no-default-features --test model_review_credentials` | Real HostFile credential/configuration integration regressions, serialized with `--test-threads=1`. |
+  | `-p vibex-desktop-runtime --lib model_review` | Owner-bound single-use tickets, cancellation and report persistence. |
+  | `-p vibex-backend --lib disconnected_review` | Offline review refuses local credential fallback. |
+  | `-p vibex-desktop --lib model_review` | Selection and confirmation/cancellation state in `code_workbench::model_review`. |
+
+  Desktop has an implicit Cargo library target at `apps/desktop/src/lib.rs`;
+  its `code_workbench` module owns these tests. `--bin vibex-desktop` would
+  select the launcher instead. These are targeted regressions, not the full
+  workspace test suite, a real model call, or native GUI acceptance.
+  Run the credential suite in its own Cargo invocation: a workspace-wide run
+  may unify desktop's `os-keychain` feature. That test is ignored in this case
+  and asserts the feature is off even if manually forced with `--ignored`.
+  The dedicated CI gate rejects ignored tests and must execute the HostFile
+  path without the unit-test in-memory secret store or OS keychain access.
 - Parse workflow YAML and PowerShell, `node --check` the packager, and run
   `pnpm check:frontend` for changed build tooling.
 - Validate a real portable package against already built Windows binaries;

@@ -160,6 +160,97 @@ fn ok_json(body: Value) -> String {
     )
 }
 
+#[test]
+fn chat_text_accepts_only_absent_null_or_empty_tool_calls() {
+    let reply = json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"report!"}}]});
+    for tool_calls in [None, Some(Value::Null), Some(json!([]))] {
+        let mut response = reply.clone();
+        if let Some(tool_calls) = tool_calls {
+            response["choices"][0]["message"]["tool_calls"] = tool_calls;
+        }
+        assert_eq!(
+            Wire::Chat.read_text(&serde_json::to_vec(&response).unwrap()),
+            Some("report!".to_owned())
+        );
+    }
+    for tool_calls in [json!([{}]), json!({}), json!(""), json!(false), json!(0)] {
+        let mut response = reply.clone();
+        response["choices"][0]["message"]["tool_calls"] = tool_calls;
+        assert_eq!(
+            Wire::Chat.read_text(&serde_json::to_vec(&response).unwrap()),
+            None
+        );
+    }
+}
+
+#[test]
+fn review_text_rejects_refusals_incomplete_and_malformed_replies() {
+    for (wire, reply) in [
+        (
+            Wire::Chat,
+            json!({"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"partial"}}]}),
+        ),
+        (
+            Wire::Chat,
+            json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"ignored","refusal":"declined"}}]}),
+        ),
+        (
+            Wire::Chat,
+            json!({"choices":[{"message":{"role":"assistant","content":"  "}}]}),
+        ),
+        (
+            Wire::Responses,
+            json!({"status":"incomplete","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}),
+        ),
+        (Wire::Responses, json!({"status":"failed","output":[]})),
+        (
+            Wire::Responses,
+            json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"declined"}]}]}),
+        ),
+        (Wire::Responses, json!({"status":"completed","output":[]})),
+    ] {
+        assert_eq!(wire.read_text(&serde_json::to_vec(&reply).unwrap()), None);
+    }
+    for wire in [Wire::Chat, Wire::Responses] {
+        assert_eq!(wire.read_text(b"not JSON"), None);
+        assert_eq!(wire.read_text(b"null"), None);
+        assert_eq!(wire.read_text(br#"{"error":{"message":"failure"}}"#), None);
+    }
+}
+
+#[test]
+fn review_timeouts_preserve_defaults_caps_and_reject_zero() {
+    let (_dir, _service, mut provider, _) = fixture(profile(
+        "https://provider.invalid/v1",
+        WIRE_PROTOCOL_OPENAI_RESPONSES,
+    ));
+    for (connect, request, expected_connect, expected_request) in [
+        (None, None, 10_000, 120_000),
+        (Some(250), Some(500), 250, 500),
+        (Some(20_000), Some(240_000), 10_000, 120_000),
+    ] {
+        provider.metadata.connect_timeout_ms = connect;
+        provider.metadata.request_timeout_ms = request;
+        let selected = route(&provider, &provider.configured_models[0], &[], None).unwrap();
+        assert_eq!(
+            selected.connect_timeout,
+            Duration::from_millis(expected_connect)
+        );
+        assert_eq!(
+            selected.request_timeout,
+            Duration::from_millis(expected_request)
+        );
+    }
+    for (connect, request) in [(Some(0), None), (None, Some(0))] {
+        provider.metadata.connect_timeout_ms = connect;
+        provider.metadata.request_timeout_ms = request;
+        assert!(matches!(
+            route(&provider, &provider.configured_models[0], &[], None),
+            Err(error) if error.code == "model_review_configuration_unsupported"
+        ));
+    }
+}
+
 #[tokio::test]
 async fn only_the_confirmed_text_and_selected_model_reach_the_declared_endpoint() {
     for (pin, endpoint, path, reply, expected) in [
@@ -174,7 +265,7 @@ async fn only_the_confirmed_text_and_selected_model_reach_the_declared_endpoint(
             WIRE_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
             "/v1/chat/completions",
             "/v1/chat/completions",
-            json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"report!"}}]}),
+            json!({"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"report!","tool_calls":[]}}]}),
             json!({"model":MODEL,"stream":false,"messages":[{"role":"user","content":TEXT}]}),
         ),
     ] {
@@ -337,10 +428,16 @@ async fn timeout_and_dropping_an_inflight_review_close_the_request() {
         let (mut stream, ..) = timeout(Duration::from_secs(5), async {
             tokio::select! { request = mock.request() => request, result = &mut send => panic!("request finished before mock read: {result:?}") }
         }).await.unwrap();
+        let observed_request = std::time::Instant::now();
         if cancel {
             drop(send);
         } else {
-            assert_eq!(send.await.unwrap_err().code, "model_review_timeout");
+            let error = timeout(Duration::from_secs(3), send)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(error.code, "model_review_timeout");
+            assert!(observed_request.elapsed() < Duration::from_secs(3));
         }
         let mut byte = [0];
         let closed = timeout(Duration::from_secs(3), stream.read(&mut byte))
@@ -355,6 +452,48 @@ async fn timeout_and_dropping_an_inflight_review_close_the_request() {
         );
         mock.assert_no_request();
     }
+}
+
+#[tokio::test]
+async fn review_timeout_covers_a_stalled_body_after_headers() {
+    let mock = Mock::new();
+    let mut config = profile(&mock.base, WIRE_PROTOCOL_OPENAI_RESPONSES);
+    config.metadata.request_timeout_ms = Some(500);
+    let (_dir, service, _, target) = fixture(config);
+    let mut send = Box::pin(service.prepare_model_review(&target).unwrap().send(TEXT));
+    let (mut stream, ..) = timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            request = mock.request() => request,
+            result = &mut send => panic!("request finished before mock read: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 128\r\n\r\n{",
+        )
+        .await
+        .unwrap();
+    let observed_headers = std::time::Instant::now();
+    let error = timeout(Duration::from_secs(3), send)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, "model_review_timeout");
+    assert!(observed_headers.elapsed() < Duration::from_secs(3));
+    let mut byte = [0];
+    let closed = timeout(Duration::from_secs(3), stream.read(&mut byte))
+        .await
+        .unwrap();
+    assert!(
+        matches!(closed, Ok(0))
+            || closed.is_err_and(|error| matches!(
+                error.kind(),
+                ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+            ))
+    );
+    mock.assert_no_request();
 }
 
 #[test]

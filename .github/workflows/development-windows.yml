@@ -90,6 +90,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable shader gate regression checks failed' }
           cargo metadata --locked --no-deps --format-version 1 > "$env:RUNNER_TEMP\vibex-metadata.json"
           if ($LASTEXITCODE -ne 0) { throw 'Locked workspace metadata failed' }
+      - name: Run model review regression gates
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/vibex-model-review-target
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "false"
+          CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG_ASSERTIONS: "false"
+          CARGO_TERM_COLOR: never
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $suites = @(
+            @{ Package = 'vibex-git'; Arguments = @('--lib', 'review') },
+            @{ Package = 'vibex-config-switch'; Arguments = @('--lib', 'model_review') },
+            @{ Package = 'vibex-config-switch'; Arguments = @('--no-default-features', '--test', 'model_review_credentials') },
+            @{ Package = 'vibex-desktop-runtime'; Arguments = @('--lib', 'model_review') },
+            @{ Package = 'vibex-backend'; Arguments = @('--lib', 'disconnected_review') },
+            @{ Package = 'vibex-desktop'; Arguments = @('--lib', 'model_review') }
+          )
+          foreach ($suite in $suites) {
+            $testArguments = @('test', '--locked', '-p', $suite.Package) + $suite.Arguments
+            $label = $testArguments -join ' '
+            Write-Output "Listing $label"
+            $listing = @(& cargo @testArguments -- --list --format terse)
+            if ($LASTEXITCODE -ne 0) { throw "Test discovery failed: $label" }
+            $listedTests = @($listing | Where-Object { $_ -match '^.+: test$' })
+            if ($listedTests.Count -eq 0) { throw "No tests matched: $label" }
+            $listedTests | Write-Output
+            Write-Output "Running $($listedTests.Count) tests: $label"
+            & cargo @testArguments -- --test-threads=1 --format terse | Tee-Object -Variable testOutput
+            if ($LASTEXITCODE -ne 0) { throw "Tests failed: $label" }
+            $summaries = @($testOutput | Where-Object { $_ -match '^test result: ok\. (\d+) passed; 0 failed; 0 ignored;' })
+            if ($summaries.Count -ne 1 -or $summaries[0] -notmatch '^test result: ok\. (\d+) passed;') {
+              throw "Missing successful, non-ignored test result: $label"
+            }
+            if ([int]$Matches[1] -ne $listedTests.Count) {
+              throw "Executed test count differs from discovery: $label"
+            }
+          }
       - name: Build desktop and terminal client
         run: |
           cargo build -p vibex-desktop -p vibex-client --locked --jobs 2
