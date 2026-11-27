@@ -10868,6 +10868,7 @@ dependencies = [
  "pdfium-render",
  "percent-encoding",
  "qrcode",
+ "raw-window-handle",
  "reqwest",
  "resvg 0.46.0",
  "rfd",

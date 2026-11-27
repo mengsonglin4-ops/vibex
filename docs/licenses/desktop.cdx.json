@@ -48115,6 +48115,7 @@
         "cargo:pdfium-render@0.9.3:c19b7c6f923b580a",
         "cargo:percent-encoding@2.3.2:c19b7c6f923b580a",
         "cargo:qrcode@0.14.1:c19b7c6f923b580a",
+        "cargo:raw-window-handle@0.6.2:c19b7c6f923b580a",
         "cargo:reqwest@0.13.4:c19b7c6f923b580a",
         "cargo:resvg@0.46.0:c19b7c6f923b580a",
         "cargo:rfd@0.17.2:c19b7c6f923b580a",

@@ -121,7 +121,10 @@ impl SystemTray {
     }
 
     fn close_visible_window(&mut self, window: &mut Window, cx: &mut App) -> bool {
-        if self.quitting || self.visible_window != Some(window.window_handle()) {
+        if self.quitting {
+            return !cfg!(target_os = "windows");
+        }
+        if self.visible_window != Some(window.window_handle()) {
             return true;
         }
 
@@ -133,17 +136,26 @@ impl SystemTray {
             .close_behavior
             .runs_in_background();
         if !run_in_background {
-            cx.set_quit_mode(QuitMode::LastWindowClosed);
             self.quitting = true;
-            return true;
+            return quit_without_destroying_window_first(cx);
         }
 
         self.last_window_bounds = window.window_bounds();
-        self.workbench.update(cx, |workbench, cx| {
-            workbench.prepare_for_window_close(window, cx)
-        });
-        self.visible_window = None;
-        true
+        #[cfg(target_os = "windows")]
+        {
+            if !crate::platform::set_window_visibility(window, false) {
+                eprintln!("vibex-window: hide-to-tray-failed");
+            }
+            false
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.workbench.update(cx, |workbench, cx| {
+                workbench.prepare_for_window_close(window, cx)
+            });
+            self.visible_window = None;
+            true
+        }
     }
 
     fn restore(&mut self, cx: &mut App) {
@@ -254,7 +266,7 @@ impl SystemTray {
             }),
             QUIT_ID => {
                 self.quitting = true;
-                cx.quit();
+                crate::platform::request_quit(cx);
             }
             _ => {}
         }
@@ -284,9 +296,33 @@ pub(crate) fn initialize(
 
 pub(crate) fn handle_window_close(window: &mut Window, cx: &mut App) -> bool {
     if !cx.has_global::<SystemTray>() {
+        #[cfg(target_os = "windows")]
+        if cx.windows().len() == 1 {
+            return quit_without_destroying_window_first(cx);
+        }
         return true;
     }
     cx.update_global::<SystemTray, _>(|tray, cx| tray.close_visible_window(window, cx))
+}
+
+fn quit_without_destroying_window_first(cx: &mut App) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        crate::platform::request_quit(cx);
+        false
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        cx.set_quit_mode(QuitMode::LastWindowClosed);
+        true
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn cancel_quit(cx: &mut App) {
+    if cx.has_global::<SystemTray>() {
+        cx.update_global::<SystemTray, _>(|tray, _| tray.quitting = false);
+    }
 }
 
 /// Restores the workbench window for a platform reopen request, which is the
@@ -389,7 +425,13 @@ fn poll_events(cx: &mut App) {
 
 fn activate_existing_window(window_handle: AnyWindowHandle, cx: &mut App) -> bool {
     if window_handle
-        .update(cx, |_, window, _| window.activate_window())
+        .update(cx, |_, window, _| {
+            #[cfg(target_os = "windows")]
+            if !crate::platform::set_window_visibility(window, true) {
+                eprintln!("vibex-window: restore-from-tray-failed");
+            }
+            window.activate_window();
+        })
         .is_err()
     {
         return false;
@@ -444,6 +486,77 @@ fn normalized_window_bounds(bounds: WindowBounds) -> WindowBounds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_review_windows_shutdown_disconnects_before_async_cleanup() {
+        let source = include_str!("app.rs");
+        let callback = source
+            .split_once("this.quit_subscription = Some(cx.on_app_quit(|this, cx| {")
+            .unwrap()
+            .1
+            .split_once("if this.ui_state.developer.show_fps_monitor")
+            .unwrap()
+            .0;
+        assert!(
+            callback
+                .find("disconnect_before_window_destruction()")
+                .unwrap()
+                < callback.find("async move").unwrap()
+        );
+        assert!(callback.contains("writer.flush()"));
+        assert!(callback.contains("runtime.shutdown().await"));
+    }
+
+    #[test]
+    fn model_review_windows_shutdown_preserves_native_window_until_disconnect() {
+        let source = include_str!("system_tray.rs").replace("\r\n", "\n");
+        let close = source
+            .split_once("fn close_visible_window(")
+            .unwrap()
+            .1
+            .split_once("fn restore(")
+            .unwrap()
+            .0;
+        assert!(
+            close
+                .contains("if self.quitting {\n            return !cfg!(target_os = \"windows\");")
+        );
+        assert!(close.contains("return quit_without_destroying_window_first(cx)"));
+        assert!(close.contains("set_window_visibility(window, false)"));
+        let quit = source
+            .split_once("fn quit_without_destroying_window_first(")
+            .unwrap()
+            .1
+            .split_once("/// Restores the workbench")
+            .unwrap()
+            .0;
+        assert!(quit.contains("crate::platform::request_quit(cx);\n        false"));
+        let restore = source
+            .split_once("fn activate_existing_window(")
+            .unwrap()
+            .1
+            .split_once("fn load_tray_icon(")
+            .unwrap()
+            .0;
+        assert!(restore.contains("set_window_visibility(window, true)"));
+        let platform = include_str!("platform/mod.rs");
+        let request = platform
+            .split_once("pub(crate) fn request_quit(")
+            .unwrap()
+            .1
+            .split_once("// Only the regression")
+            .unwrap()
+            .0;
+        assert!(request.contains("cx.spawn(async |cx|"));
+        assert!(
+            request
+                .find("disconnect_before_window_destruction()")
+                .unwrap()
+                < request.find("cx.update(").unwrap()
+        );
+        assert!(request.contains("Ok(()) => cx.quit()"));
+        assert!(request.contains("crate::system_tray::cancel_quit(cx)"));
+    }
 
     #[test]
     fn tray_icon_is_high_contrast_and_rounded() {

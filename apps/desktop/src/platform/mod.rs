@@ -15,6 +15,37 @@ use vibex_core::{VibexError, VibexResult};
 #[cfg(target_os = "linux")]
 pub mod bounded_text;
 mod http;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_shutdown;
+
+#[cfg(target_os = "windows")]
+pub(crate) fn set_window_visibility(window: &gpui::Window, visible: bool) -> bool {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+    windows_shutdown::set_visibility(handle.hwnd.get(), visible)
+}
+
+pub(crate) fn request_quit(cx: &mut App) {
+    #[cfg(target_os = "windows")]
+    cx.spawn(async |cx| {
+        let result = windows_shutdown::disconnect_before_window_destruction();
+        cx.update(|cx| match result {
+            Ok(()) => cx.quit(),
+            Err(code) => {
+                crate::system_tray::cancel_quit(cx);
+                eprintln!("vibex-shutdown: quit-cancelled-uia-disconnect-failed code={code:#010x}");
+            }
+        });
+    })
+    .detach();
+    #[cfg(not(target_os = "windows"))]
+    cx.quit();
+}
 
 // Only the regression tests name the client type; production code reaches it
 // through `http::client`.

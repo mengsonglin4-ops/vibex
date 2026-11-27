@@ -14761,6 +14761,11 @@ impl VibexWorkbench {
         });
         this.bind_to_window(window, cx);
         this.quit_subscription = Some(cx.on_app_quit(|this, cx| {
+            #[cfg(target_os = "windows")]
+            match crate::platform::windows_shutdown::disconnect_before_window_destruction() {
+                Ok(()) => eprintln!("vibex-shutdown: uia-disconnected-before-window-destruction"),
+                Err(code) => eprintln!("vibex-shutdown: uia-disconnect-failed code={code:#010x}"),
+            }
             let code_workbench_state = this.code_workbench.read(cx).persisted_state_for_exit();
             this.apply_code_workbench_state(code_workbench_state);
             if let Some(writer) = this.ui_writer.as_mut() {
@@ -16992,7 +16997,7 @@ impl VibexWorkbench {
                     match outcome {
                         Ok(Ok(restarted)) => {
                             if restarted {
-                                cx.quit();
+                                crate::platform::request_quit(cx);
                             }
                         }
                         Ok(Err(error)) => this.queue_settings_operation_notice(
@@ -17020,7 +17025,7 @@ impl VibexWorkbench {
             return;
         };
         match runtime.app_update().restart() {
-            Ok(()) => cx.quit(),
+            Ok(()) => crate::platform::request_quit(cx),
             Err(error) => {
                 self.queue_settings_operation_notice(
                     SettingsOperationNotice::error(format!("{}: {}", error.code, error.message)),

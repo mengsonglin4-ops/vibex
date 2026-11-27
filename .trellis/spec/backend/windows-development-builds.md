@@ -165,3 +165,29 @@ and ship a debug EXE that still loads HLSL from the build runner's directories.
 Correct: disable debug assertions in both the library and build script, require
 FXC, inspect embedded shader bytes before upload, preserve the launcher runtime
 environment and report local GUI acceptance separately.
+
+## 8. Windows accessibility shutdown
+
+- AccessKit providers can receive COM geometry queries after a native HWND is
+  destroyed. Normal app exit must disconnect process-owned UIA providers before
+  GPUI clears its windows, not inside an async quit future that runs afterwards.
+- Queue the cancellable exit preparation on the foreground executor, outside
+  synchronous SendMessage handling. Guard current UI-thread top-level and child
+  windows against reentrant WM_GETOBJECT, then call UiaDisconnectAllProviders.
+  Keep the guards until WM_NCDESTROY on success; restore them and preserve the
+  running app on failure. The synchronous on_app_quit guard is idempotent fallback.
+- Windows quit-on-close refuses default window destruction, including repeated
+  close requests. Close-to-tray hides and restores the same HWND instead of
+  destroying it without an application shutdown. Other platforms retain their
+  existing close policy. Do not disable accessibility or patch third-party crates.
+- The direct raw-window-handle dependency reuses the locked 0.6.2 package; keep
+  the lockfile and SBOM dependency edge synchronized without moving package pins.
+- Validate rollback on subclass/disconnect errors, the synchronous ordering, and
+  a native UIA client retaining a provider across destruction. GUI acceptance
+  requires repeated exit/reopen, tray hide/restore, no panic in stderr, persisted
+  state, and unchanged real user data. Exit code zero alone is insufficient.
+- Forced OS session termination and individual detached-window destruction are
+  separate boundaries: a quit callback cannot cancel OS teardown, and a process
+  disconnect must not be used to retire one window while others remain active.
+  Log skipped/failed shutdown protection; do not claim those paths were covered
+  by normal-exit smoke tests.
