@@ -1,5 +1,7 @@
 use std::cell::Cell;
 use std::ffi::c_void;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type WindowHandle = *mut c_void;
 type WindowCallback = unsafe extern "system" fn(WindowHandle, isize) -> i32;
@@ -11,6 +13,8 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_NCDESTROY: u32 = 0x0082;
 const SUBCLASS_ID: usize = 0x56425841;
 const RPC_E_CANTCALLOUT_ININPUTSYNCCALL: i32 = 0x8001010d_u32 as i32;
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static PENDING_WINDOWS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 thread_local! {
     static DISCONNECT_RESULT: Cell<Option<Result<(), i32>>> = const { Cell::new(None) };
 }
@@ -26,6 +30,7 @@ unsafe extern "system" {
     ) -> i32;
     fn InSendMessageEx(reserved: *const c_void) -> u32;
     fn ShowWindowAsync(window: WindowHandle, command: i32) -> i32;
+    fn GetClassNameW(window: WindowHandle, name: *mut u16, capacity: i32) -> i32;
 }
 
 #[link(name = "kernel32")]
@@ -68,6 +73,11 @@ unsafe extern "system" fn stopping_window(
     }
     if message == WM_NCDESTROY {
         unsafe { RemoveWindowSubclass(window, Some(stopping_window), SUBCLASS_ID) };
+        let result = unsafe { DefSubclassProc(window, message, wparam, lparam) };
+        if let Ok(mut pending) = PENDING_WINDOWS.lock() {
+            pending.retain(|handle| *handle != window as isize);
+        }
+        return result;
     }
     unsafe { DefSubclassProc(window, message, wparam, lparam) }
 }
@@ -104,10 +114,16 @@ pub(crate) fn disconnect_before_window_destruction() -> Result<(), i32> {
         return Err((0x80070000 | unsafe { GetLastError() } & 0xffff) as i32);
     }
     DISCONNECT_RESULT.set(Some(Err(0x8000000a_u32 as i32)));
+    let pending = windows
+        .iter()
+        .filter(|window| is_gpui_window(**window))
+        .map(|window| *window as isize)
+        .collect::<Vec<_>>();
     let result = guarded_disconnect(
         &windows,
         |window| unsafe { SetWindowSubclass(*window, Some(stopping_window), SUBCLASS_ID, 0) != 0 },
         || {
+            expect_window_destruction(pending);
             let code = unsafe { UiaDisconnectAllProviders() };
             if code < 0 { Err(code) } else { Ok(()) }
         },
@@ -115,8 +131,21 @@ pub(crate) fn disconnect_before_window_destruction() -> Result<(), i32> {
             RemoveWindowSubclass(*window, Some(stopping_window), SUBCLASS_ID);
         },
     );
+    if result.is_err() {
+        expect_window_destruction(Vec::new());
+    }
     DISCONNECT_RESULT.set(result.is_ok().then_some(result));
     result
+}
+
+fn is_gpui_window(window: WindowHandle) -> bool {
+    let mut name = [0u16; 128];
+    let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+    length > 0
+        && name[..length as usize]
+            .iter()
+            .copied()
+            .eq("GpuiFast::Window".encode_utf16())
 }
 
 fn guarded_disconnect<Handle>(
@@ -144,6 +173,28 @@ fn guarded_disconnect<Handle>(
 
 pub(super) fn set_visibility(handle: isize, visible: bool) -> bool {
     unsafe { ShowWindowAsync(handle as WindowHandle, if visible { 5 } else { 0 }) != 0 }
+}
+
+pub(super) fn begin_exit() -> bool {
+    !EXIT_REQUESTED.swap(true, Ordering::SeqCst)
+}
+
+pub(super) fn exit_requested() -> bool {
+    EXIT_REQUESTED.load(Ordering::SeqCst)
+}
+
+pub(super) fn cancel_exit() {
+    EXIT_REQUESTED.store(false, Ordering::SeqCst);
+}
+
+pub(super) fn expect_window_destruction(handles: Vec<isize>) {
+    *PENDING_WINDOWS.lock().unwrap() = handles;
+}
+
+pub(super) fn pending_window_count() -> usize {
+    PENDING_WINDOWS
+        .lock()
+        .map_or(usize::MAX, |pending| pending.len())
 }
 
 #[cfg(test)]

@@ -14986,6 +14986,9 @@ impl VibexWorkbench {
         agent_session_id: Option<VibexSessionId>,
         cx: &mut Context<Self>,
     ) {
+        if crate::platform::exit_requested() {
+            return;
+        }
         let (Some(runtime), Some(tokio)) =
             (self.computer_runtime.clone(), self.computer_tokio.clone())
         else {
@@ -41304,6 +41307,9 @@ impl VibexWorkbench {
     }
 
     fn detach_preview_window(&mut self, origin_window: AnyWindowHandle, cx: &mut Context<Self>) {
+        if crate::platform::exit_requested() {
+            return;
+        }
         if let Some(existing) = self.preview_window {
             // One panel, one window: a second pop-out request raises the window
             // that already hosts it rather than opening another.
@@ -107265,6 +107271,9 @@ pub fn claim_workbench_launch() -> LaunchClaim {
 }
 
 pub fn open_workbench_window(cx: &mut App) -> Result<(), String> {
+    if crate::platform::exit_requested() {
+        return Err("The desktop is shutting down".to_owned());
+    }
     bind_foundation_keys(cx);
     bind_terminal_keys(cx);
     let application_id = release_application_id()

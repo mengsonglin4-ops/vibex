@@ -32,19 +32,56 @@ pub(crate) fn set_window_visibility(window: &gpui::Window, visible: bool) -> boo
 
 pub(crate) fn request_quit(cx: &mut App) {
     #[cfg(target_os = "windows")]
-    cx.spawn(async |cx| {
-        let result = windows_shutdown::disconnect_before_window_destruction();
-        cx.update(|cx| match result {
-            Ok(()) => cx.quit(),
-            Err(code) => {
-                crate::system_tray::cancel_quit(cx);
+    {
+        if !windows_shutdown::begin_exit() {
+            return;
+        }
+        cx.spawn(async |cx| {
+            if let Err(code) = windows_shutdown::disconnect_before_window_destruction() {
+                windows_shutdown::cancel_exit();
+                cx.update(|cx| {
+                    crate::system_tray::cancel_quit(cx);
+                });
                 eprintln!("vibex-shutdown: quit-cancelled-uia-disconnect-failed code={code:#010x}");
+                return;
             }
-        });
-    })
-    .detach();
+            eprintln!("vibex-shutdown: shutdown-start");
+            cx.update(|cx| {
+                cx.set_quit_mode(gpui::QuitMode::Explicit);
+                cx.shutdown();
+            });
+            let started = std::time::Instant::now();
+            while windows_shutdown::pending_window_count() != 0 {
+                if started.elapsed() >= std::time::Duration::from_secs(5) {
+                    eprintln!(
+                        "vibex-shutdown: native-window-drain-timeout remaining={}",
+                        windows_shutdown::pending_window_count()
+                    );
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(10))
+                    .await;
+            }
+            eprintln!("vibex-shutdown: native-windows-destroyed");
+            cx.update(|cx| cx.quit());
+            eprintln!("vibex-shutdown: quit-posted");
+        })
+        .detach();
+    }
     #[cfg(not(target_os = "windows"))]
     cx.quit();
+}
+
+pub(crate) fn exit_requested() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        windows_shutdown::exit_requested()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 // Only the regression tests name the client type; production code reaches it

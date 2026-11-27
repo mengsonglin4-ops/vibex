@@ -159,7 +159,7 @@ impl SystemTray {
     }
 
     fn restore(&mut self, cx: &mut App) {
-        if self.quitting {
+        if self.quitting || crate::platform::exit_requested() {
             return;
         }
         if let Some(visible_window) = self.visible_window
@@ -295,6 +295,9 @@ pub(crate) fn initialize(
 }
 
 pub(crate) fn handle_window_close(window: &mut Window, cx: &mut App) -> bool {
+    if crate::platform::exit_requested() {
+        return false;
+    }
     if !cx.has_global::<SystemTray>() {
         #[cfg(target_os = "windows")]
         if cx.windows().len() == 1 {
@@ -346,6 +349,9 @@ pub fn handle_reopen(cx: &mut App) {
 /// quits with its last window, so any window it still has can be raised
 /// directly.
 pub fn handle_second_launch(cx: &mut App) {
+    if crate::platform::exit_requested() {
+        return;
+    }
     if cx.has_global::<SystemTray>() {
         cx.update_global::<SystemTray, _>(|tray, cx| tray.handle_second_launch(cx));
         return;
@@ -552,10 +558,21 @@ mod tests {
             request
                 .find("disconnect_before_window_destruction()")
                 .unwrap()
-                < request.find("cx.update(").unwrap()
+                < request.find("cx.shutdown()").unwrap()
         );
-        assert!(request.contains("Ok(()) => cx.quit()"));
+        assert!(request.contains(
+            "if let Err(code) = windows_shutdown::disconnect_before_window_destruction()"
+        ));
+        assert!(request.contains("cx.shutdown()"));
+        assert!(request.contains("pending_window_count() != 0"));
+        assert!(request.find("cx.shutdown()").unwrap() < request.find("cx.quit()").unwrap());
         assert!(request.contains("crate::system_tray::cancel_quit(cx)"));
+        let app = include_str!("app.rs");
+        for method in ["fn open_computer_panel_in(", "fn detach_preview_window("] {
+            let body = app.split_once(method).unwrap().1;
+            let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+            assert!(body.contains("if crate::platform::exit_requested()"));
+        }
     }
 
     #[test]

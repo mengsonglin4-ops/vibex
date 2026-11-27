@@ -180,6 +180,16 @@ environment and report local GUI acceptance separately.
   close requests. Close-to-tray hides and restores the same HWND instead of
   destroying it without an application shutdown. Other platforms retain their
   existing close policy. Do not disable accessibility or patch third-party crates.
+- Keep the normal Win32 message loop running while GPUI shutdown queues its
+  asynchronous window destruction. After installing guards but before UIA
+  disconnect, record native `GpuiFast::Window` HWNDs, including logically removed
+  windows still awaiting destruction. Run `App::shutdown` with explicit quit
+  mode, and await their WM_NCDESTROY
+  acknowledgements outside the AppCell borrow before posting quit. A second
+  shutdown from the platform must have no new windows or quit observers.
+  Stop state rejects duplicate quits and workbench restore/reopen. A drain
+  deadline logs failure and keeps the loop alive; never call process::exit,
+  manually destroy the platform HWND, or swallow TLS panics to force success.
 - The direct raw-window-handle dependency reuses the locked 0.6.2 package; keep
   the lockfile and SBOM dependency edge synchronized without moving package pins.
 - Validate rollback on subclass/disconnect errors, the synchronous ordering, and

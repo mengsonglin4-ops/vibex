@@ -594,6 +594,7 @@ fn run() {
             .expect("failed to open Vibex preview window");
             cx.activate(true);
         });
+    eprintln!("vibex-shutdown: application-run-returned");
 }
 
 #[cfg(test)]
