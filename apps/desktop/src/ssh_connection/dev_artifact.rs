@@ -88,7 +88,7 @@ pub fn from_environment(
 /// Split out so "no variable set means the signed manifest" and the legacy
 /// alias are both testable: a test that set process environment variables would
 /// race every other test in this binary.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test))]
 fn resolve(
     artifact: Option<String>,
     version: Option<String>,
@@ -333,6 +333,14 @@ mod tests {
             resolved.is_none(),
             "an unset override must leave the release path untouched"
         );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn packaged_build_never_selects_a_development_artifact() {
+        for arch in [RemoteArch::X86_64, RemoteArch::Aarch64] {
+            assert!(from_environment(arch, "0.1.9").unwrap().is_none());
+        }
     }
 
     #[test]

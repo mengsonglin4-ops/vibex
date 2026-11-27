@@ -541,6 +541,11 @@ validate_reinstall(current, target, channel) -> Result<(), String>
   `#[cfg(not(debug_assertions))] -> Ok(None)`, so a packaged desktop can only
   follow the signed manifest. This is the whole reason the override is
   acceptable: the trust chain documented for releases is unchanged.
+- The internal `resolve` helper is available under `any(debug_assertions, test)`
+  so unit-test compilation also works with debug assertions disabled for
+  portable Windows shaders. This does not enable the production override:
+  `from_environment` keeps its original debug-assertion gates, and its
+  non-debug branch must return `None` even when an override variable is set.
 - The artifact's size and SHA-256 are computed from the file, so the host
   verifies the same digest a release artifact carries. Nothing is signed,
   because the file never leaves the developer's machine.
