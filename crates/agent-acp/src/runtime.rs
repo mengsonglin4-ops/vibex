@@ -9601,7 +9601,9 @@ impl RuntimeSelectionResolver for AcpRuntimeSwitchBridge {
                 return Err(runtime_configuration_unavailable("model_unavailable"));
             }
         }
-        let session_probe = if (effective_selection.reasoning_effort.is_some()
+        let (session_probe, session_probe_error) = if (effective_selection
+            .reasoning_effort
+            .is_some()
             || effective_selection.mode_id.is_some())
             && let Some(provider_profile_id) = context.launch_profile_id.as_ref()
         {
@@ -9620,9 +9622,12 @@ impl RuntimeSelectionResolver for AcpRuntimeSwitchBridge {
                     .probe_session_config(selection.agent_id.clone(), provider_profile_id.clone())
                     .await
             };
-            probe.ok()
+            match probe {
+                Ok(probe) => (Some(probe), None),
+                Err(error) => (None, Some(error)),
+            }
         } else {
-            None
+            (None, None)
         };
         // An Agent with no reasoning dimension cannot be asked for a level. The
         // composer keeps one reasoning effort per Agent, but a route group is
@@ -9751,9 +9756,7 @@ impl RuntimeSelectionResolver for AcpRuntimeSwitchBridge {
                 supported = true;
                 effective_selection.mode_id = Some(mode.clone());
             }
-            if !supported {
-                return Err(runtime_configuration_unavailable("mode_unavailable"));
-            }
+            require_session_mode_support(supported, session_probe_error.as_ref())?;
         }
         if selection.auth_context_id().is_some()
             && selection.config_values.iter().any(|(id, value)| {
@@ -10554,6 +10557,42 @@ impl ActiveWorkGate for AcpRuntimeSwitchBridge {
             )),
         }
     }
+}
+
+fn require_session_mode_support(
+    supported: bool,
+    probe_error: Option<&VibexError>,
+) -> VibexResult<()> {
+    if supported {
+        return Ok(());
+    }
+    let Some(probe_error) = probe_error else {
+        return Err(runtime_configuration_unavailable("mode_unavailable"));
+    };
+    let mut error = VibexError::new(
+        probe_error.category,
+        "runtime_session_config_probe_failed",
+        "Agent session configuration discovery failed; the requested mode could not be verified",
+    )
+    .with_recovery_hint(
+        "Check the Agent runtime and retry configuration discovery before starting the session. No model prompt was sent by this discovery step.",
+    )
+    .with_diagnostic("probeErrorCode", safe_runtime_configuration_cause_code(&probe_error.code));
+    for diagnostic in &probe_error.diagnostics {
+        if diagnostic.key == "method"
+            && matches!(
+                diagnostic.value.as_str(),
+                "initialize" | "session/new" | "session/set_model" | "session/set_config_option"
+            )
+        {
+            error = error.with_diagnostic("method", diagnostic.value.clone());
+        } else if diagnostic.key == "timeoutMs"
+            && let Ok(timeout_ms) = diagnostic.value.parse::<u64>()
+        {
+            error = error.with_diagnostic("timeoutMs", timeout_ms.to_string());
+        }
+    }
+    Err(error)
 }
 
 fn runtime_configuration_unavailable(cause_code: &str) -> VibexError {
@@ -24047,6 +24086,112 @@ mod tests {
             let mut descriptor = terminal_auth_action_descriptor(request);
             descriptor.terminal_id = Some(terminal_id);
             Ok(descriptor)
+        }
+    }
+
+    mod session_mode {
+        use super::*;
+
+        #[test]
+        fn failed_probe_is_not_reported_as_unsupported_mode() {
+            let source = VibexError::process("acp_request_timeout", "sensitive upstream text")
+                .with_diagnostic("method", "session/new")
+                .with_diagnostic("timeoutMs", "20000")
+                .with_diagnostic("stderrSummary", "private path or credential");
+            let error = require_session_mode_support(false, Some(&source)).unwrap_err();
+            assert_eq!(error.category, vibex_core::ErrorCategory::Process);
+            assert_eq!(error.code, "runtime_session_config_probe_failed");
+            assert_eq!(error.diagnostics.len(), 3);
+            for (key, value) in [
+                ("probeErrorCode", "acp_request_timeout"),
+                ("method", "session/new"),
+                ("timeoutMs", "20000"),
+            ] {
+                assert!(
+                    error
+                        .diagnostics
+                        .iter()
+                        .any(|item| item.key == key && item.value == value)
+                );
+            }
+            let serialized = serde_json::to_string(&error).unwrap();
+            assert!(!serialized.contains("sensitive upstream"));
+            assert!(!serialized.contains("private path"));
+        }
+
+        #[test]
+        fn independent_mode_evidence_survives_failed_probe() {
+            let error = VibexError::process("acp_request_timeout", "timeout");
+            assert!(require_session_mode_support(true, Some(&error)).is_ok());
+        }
+
+        #[test]
+        fn successful_probe_without_mode_still_rejects_selection() {
+            let error = require_session_mode_support(false, None).unwrap_err();
+            assert_eq!(error.code, "runtime_switch_configuration_unavailable");
+            assert!(
+                error
+                    .diagnostics
+                    .iter()
+                    .any(|item| item.key == "causeCode" && item.value == "mode_unavailable")
+            );
+        }
+
+        #[test]
+        fn probe_failure_diagnostics_are_allowlisted() {
+            let source = VibexError::provider("invalid / secret", "private")
+                .with_diagnostic("method", "private/method")
+                .with_diagnostic("timeoutMs", "private value");
+            let error = require_session_mode_support(false, Some(&source)).unwrap_err();
+            assert_eq!(error.category, vibex_core::ErrorCategory::Provider);
+            assert_eq!(error.diagnostics.len(), 1);
+            assert_eq!(error.diagnostics[0].value, "runtime_configuration_error");
+        }
+
+        #[test]
+        fn deepseek_harness_read_only_uses_advertised_permission_modes() {
+            let agent = AgentId::parse("deepseek-harness").unwrap();
+            let response = json!({
+                "modes": {
+                    "currentModeId": "read-only",
+                    "availableModes": [
+                        { "id": "read-only", "name": "Read-only" },
+                        { "id": "workspace-write", "name": "Workspace write" },
+                        { "id": "danger-full-access", "name": "Full access" }
+                    ]
+                },
+                "configOptions": [{
+                    "id": "collaboration_mode", "name": "Collaboration mode",
+                    "currentValue": "default",
+                    "options": [{ "value": "default" }, { "value": "plan" }]
+                }]
+            });
+            let modes = extract_modes_for_agent(&response, &agent);
+            assert_eq!(
+                modes
+                    .iter()
+                    .map(|mode| mode.value.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["read-only", "workspace-write", "danger-full-access"]
+            );
+            assert_eq!(
+                extract_current_mode_id_for_agent(&response, &agent).as_deref(),
+                Some("read-only")
+            );
+            assert!(
+                require_session_mode_support(
+                    modes.iter().any(|mode| mode.value == "read-only"),
+                    None
+                )
+                .is_ok()
+            );
+            assert!(
+                require_session_mode_support(
+                    modes.iter().any(|mode| mode.value == "default"),
+                    None
+                )
+                .is_err()
+            );
         }
     }
 

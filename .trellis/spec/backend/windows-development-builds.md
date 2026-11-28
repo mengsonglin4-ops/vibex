@@ -71,6 +71,12 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   `deepseek_harness` in `vibex-config-switch`. The managed single-model patch's
   hash/shape guards run in the existing `model_review` runtime suite. Both
   gates precede the full build and cannot be skipped on failure.
+- Mode evidence regressions use suite `mode`, filtering
+  `runtime::tests::session_mode::` in `vibex-agent-acp`. A failed configuration
+  probe must remain a discovery failure when no independent mode evidence
+  supports the selection, not be relabeled as an unsupported mode. The gate
+  also preserves rejection of modes absent from successful discovery and
+  keeps collaboration choices separate from DSH permission modes.
 - Codex live model regressions use the same library target with filter
   `runtime::tests::codex_model::` and suite `session`, in separate 20-minute
   compile and five-minute test steps. They must execute on Windows without

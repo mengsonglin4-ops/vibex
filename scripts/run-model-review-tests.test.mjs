@@ -152,7 +152,7 @@ test("ACP runtime probe suite is mandatory before portable build and uses its ow
     package: "vibex-agent-acp", target: "vibex_agent_acp", kind: "lib",
     source: "crates/agent-acp/src/lib.rs", filter: "runtime_probe::tests"
   });
-  assert.deepEqual(Object.keys(SUITES), ["git", "config", "credentials", "runtime", "backend", "desktop", "probe", "session", "dsh"]);
+  assert.deepEqual(Object.keys(SUITES), ["git", "config", "credentials", "runtime", "backend", "desktop", "probe", "session", "mode", "dsh"]);
   assert.deepEqual(parseArguments(["--suite", "probe", "--phase", "test"]), { suite: "probe", phase: "test", timeoutSeconds: 180 });
   const workflow = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/development-windows.yml"), "utf8");
   const compilePosition = workflow.indexOf("--suite probe --phase compile");
@@ -196,6 +196,23 @@ test("Codex live session convergence is a separate mandatory Windows gate", asyn
   assert.ok(compilePosition > 0 && compilePosition < testPosition && testPosition < buildPosition);
   assert.doesNotMatch(workflow.slice(workflow.indexOf("- name: Compile Codex session model tests"), testPosition), /continue-on-error:|if:/);
   const current = fixture("session");
+  await current.run("compile");
+  for (const mode of ["zero", "ignored", "failed"]) {
+    current.state.mode = mode;
+    await assert.rejects(current.run("test"));
+  }
+});
+
+test("session mode evidence is a mandatory Windows gate", async () => {
+  assert.equal(SUITES.mode.filter, "runtime::tests::session_mode::");
+  assert.equal(SUITES.mode.package, "vibex-agent-acp");
+  const workflow = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/development-windows.yml"), "utf8");
+  const compilePosition = workflow.indexOf("--suite mode --phase compile");
+  const testPosition = workflow.indexOf("--suite mode --phase test");
+  const buildPosition = workflow.indexOf("- name: Build desktop and terminal client");
+  assert.ok(compilePosition > 0 && compilePosition < testPosition && testPosition < buildPosition);
+  assert.doesNotMatch(workflow.slice(workflow.indexOf("- name: Compile session mode evidence tests"), testPosition), /continue-on-error:|if:/);
+  const current = fixture("mode");
   await current.run("compile");
   for (const mode of ["zero", "ignored", "failed"]) {
     current.state.mode = mode;

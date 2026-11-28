@@ -142,6 +142,12 @@ jobs:
       - name: Compile Codex session model tests
         timeout-minutes: 20
         run: node scripts/run-model-review-tests.mjs --suite session --phase compile
+      - name: Compile session mode evidence tests
+        timeout-minutes: 20
+        run: node scripts/run-model-review-tests.mjs --suite mode --phase compile
+      - name: Test session mode probe failures
+        timeout-minutes: 5
+        run: node scripts/run-model-review-tests.mjs --suite mode --phase test
       - name: Test Codex session model convergence
         timeout-minutes: 5
         run: node scripts/run-model-review-tests.mjs --suite session --phase test

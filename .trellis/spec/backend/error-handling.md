@@ -48,6 +48,13 @@ Vibex error categories. Required behavior:
 - Include provider type and detected provider version when known.
 - Include native request id or event id when available.
 - Distinguish unsupported capability from transient process failure.
+- When mode selection lacks independent support evidence and its session
+  configuration probe fails, return `runtime_session_config_probe_failed`
+  with the original error category. Preserve only a bounded error-code token,
+  allowlisted discovery method, and numeric timeout. Do not relabel a failed
+  probe as `mode_unavailable`, inherit a more permissive mode, or copy raw
+  process diagnostics into this error. Successful discovery that omits the
+  requested mode still rejects it as unsupported.
 - Record raw fallback data in debug logs, not in normal user messages.
 - An ACP JSON-RPC error or early process exit whose raw bounded message clearly
   says authentication/login is required maps to
