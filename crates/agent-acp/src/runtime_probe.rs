@@ -29,6 +29,7 @@ use vibex_db::{
 };
 
 use crate::AcpProcessInstanceId;
+use crate::codex::model_with_consistent_options as codex_model_with_consistent_options;
 use crate::protocol::{
     self, AcpOperation, build_initialize_params, build_session_load_params,
     build_session_new_params, build_session_resume_params,
@@ -1315,60 +1316,21 @@ fn probe_current_model_id(
 ) -> Option<String> {
     let observed = extract_current_model_id(response)?;
     let supported = identity.is_some_and(|identity| {
-        identity.route.agent_id.as_str() == crate::registry::CODEX_AGENT_ID
-            && identity.route.adapter_id.as_str() == crate::registry::CODEX_ADAPTER_ID
+        identity.route.adapter_id.as_str() == crate::registry::CODEX_ADAPTER_ID
             && identity.route.transport_kind == vibex_core::TransportKind::Acp
-            && identity.adapter_version.as_deref() == Some("2.12.0")
-            && extract_reported_adapter_version(initialize) == Some("2.12.0")
-            && initialize
-                .pointer("/agentInfo/name")
-                .and_then(Value::as_str)
-                == Some(crate::registry::CODEX_ADAPTER_PACKAGE)
+            && crate::codex::supports_composite_model_evidence(
+                identity.route.agent_id.as_str(),
+                identity.adapter_version.as_deref(),
+                initialize
+                    .pointer("/agentInfo/name")
+                    .and_then(Value::as_str),
+                extract_reported_adapter_version(initialize),
+            )
     });
     if supported && let Some(model) = codex_model_with_consistent_options(response, &observed) {
         return Some(model.to_string());
     }
     Some(observed)
-}
-
-fn codex_model_with_consistent_options<'a>(response: &Value, observed: &'a str) -> Option<&'a str> {
-    let (model, suffix) = observed.split_once('[')?;
-    let effort = suffix.strip_suffix(']')?;
-    if model.is_empty()
-        || model.trim() != model
-        || model.contains(']')
-        || effort.is_empty()
-        || !effort
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        return None;
-    }
-    let options = response.get("configOptions")?.as_array()?;
-    for (id, category, expected) in [
-        ("model", "model", model),
-        ("reasoning_effort", "thought_level", effort),
-    ] {
-        let mut matches = options.iter().filter(|option| {
-            option.get("id").and_then(Value::as_str) == Some(id)
-                || option.get("category").and_then(Value::as_str) == Some(category)
-        });
-        let Some(option) = matches.next() else {
-            if id == "reasoning_effort" {
-                continue;
-            }
-            return None;
-        };
-        if matches.next().is_some()
-            || option.get("id").and_then(Value::as_str) != Some(id)
-            || option.get("category").and_then(Value::as_str) != Some(category)
-            || option.get("type").and_then(Value::as_str) != Some("select")
-            || option.get("currentValue").and_then(Value::as_str) != Some(expected)
-        {
-            return None;
-        }
-    }
-    Some(model)
 }
 
 fn effective_provider_fact(

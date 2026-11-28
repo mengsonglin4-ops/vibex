@@ -5122,6 +5122,21 @@ check:agent-provider-runtime[:self-test]
   not a reasoning level; effort matching here validates consistent reporting.
   Regressions must also retain materialized config/catalog reads, isolation
   rejection, fallback, and unchanged Copilot startup arguments.
+- Live Codex attachments share the probe's evidence-checked composite-model
+  decoder, rather than comparing a raw `model[effort]` id with the projected
+  base model. The live path additionally requires the exact managed identity
+  `adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0`. New, resume, load,
+  fork, config-option updates and mutation responses decode only from their own
+  response; never reuse an earlier response's options to justify a later id.
+  Conflicting legacy and option model reports must remain non-converged.
+  A matching initial base model is a no-op even under StartupProjection;
+  changing the model still requires restart. An omitted effort option supplies
+  no reasoning-level guarantee. Preserve the version, authentication, provider
+  and execution-fence checks independently.
+- Cloud session-model regressions run through `--suite session`, including
+  actual new/resume/load request handlers, attachment initialization/rebuild,
+  no-op selection, different-model restart, live updates, and response/identity
+  negatives. A passing runtime probe alone does not establish session creation.
 - Adapter authentication status that labels a configured custom gateway is
   not proof that its credentials were accepted upstream. Likewise a
   `providers/list` response describing a configurable slot or fallback URL is

@@ -13,7 +13,7 @@ installer/update policy remain separate.
   push.branches = [cloud-development]; workflow_dispatch
 cargo build -p vibex-desktop -p vibex-client --locked --jobs 2
 node scripts/package-development-windows.mjs --output <new-directory> [--binary-dir <debug-directory>]
-node scripts/run-model-review-tests.mjs --suite <git|config|credentials|runtime|backend|desktop|probe> --phase <compile|test>
+node scripts/run-model-review-tests.mjs --suite <git|config|credentials|runtime|backend|desktop|probe|session> --phase <compile|test>
 Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 ```
 
@@ -31,7 +31,7 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   bytes generated only when its build script also has debug assertions off.
   Require the Windows SDK `fxc.exe` and set `GPUI_FXC_PATH` explicitly.
 - Before building the portable executables, run the six model-review suites
-  and the ACP runtime-probe suite
+  and the ACP runtime-probe and Codex session-model suites
   listed below, each in separate compile and test workflow steps. Compile with
   `cargo test --locked --no-run --message-format=json`, identify the unique
   requested test executable from Cargo artifacts, and record its suite, source
@@ -67,6 +67,12 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   They share the same 180-second execution deadline and nonzero/no-ignored
   gate. Run the existing six suites unchanged; passing them does not substitute
   for probe isolation, projected Codex home and Windows junction regressions.
+- Codex live model regressions use the same library target with filter
+  `runtime::tests::codex_model::` and suite `session`, in separate 20-minute
+  compile and five-minute test steps. They must execute on Windows without
+  a shebang fixture or silently returning when an interpreter is missing.
+  Probe-only success must not admit a package whose real session initialization
+  still requests an unnecessary model restart.
 - Cargo builds the entire library test target before applying a test-name
   filter. Tests using a Unix-only shebang fixture must carry the same Unix
   compilation condition as that fixture. Do not replace it with an interpreter

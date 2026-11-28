@@ -4768,12 +4768,11 @@ impl AcpSessionAttachment {
         let generation = self.activation_generation();
         let mut runtime_snapshot = None;
         if let Ok(mut state) = self.state.lock() {
-            let current_model =
-                extract_current_model_id(update).map(|model| process.product_model_id(&model));
+            let current_model = process.current_session_model_id(update);
             let current_mode = extract_current_mode_id_for_agent(update, &process.agent_id);
             let mut models = extract_config_values(model_candidates(update));
             for model in &mut models {
-                model.value = process.product_model_id(&model.value);
+                model.value = process.session_model_id(update, &model.value);
             }
             let modes = extract_modes_for_agent(update, &process.agent_id);
             {
@@ -4865,8 +4864,13 @@ impl AcpSessionAttachment {
                             // binding and the turn execution fence — compares
                             // product ids, so project it here exactly like the
                             // discovered model catalog above.
-                            next.effective_model =
-                                effective.map(|value| process.product_model_id(&value.value));
+                            next.effective_model = if process.supports_composite_model_evidence() {
+                                state.current_model_id.clone().or_else(|| {
+                                    effective.map(|value| process.product_model_id(&value.value))
+                                })
+                            } else {
+                                effective.map(|value| process.product_model_id(&value.value))
+                            };
                         }
                         crate::session_config::CANONICAL_REASONING_EFFORT => {
                             next.effective_reasoning_effort = effective.map(|value| value.value);
@@ -5591,6 +5595,34 @@ impl AcpProcess {
 
     fn product_model_id(&self, runtime_model_id: &str) -> String {
         self.model_id_projection.product_id(runtime_model_id)
+    }
+
+    fn supports_composite_model_evidence(&self) -> bool {
+        self.compatibility_identity == "adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0"
+            && self.shared.lock().is_ok_and(|shared| {
+                crate::codex::supports_composite_model_evidence(
+                    self.agent_id.as_str(),
+                    Some(&self.adapter_version),
+                    shared.agent_name.as_deref(),
+                    shared.agent_version.as_deref(),
+                )
+            })
+    }
+
+    fn reported_session_model_id<'a>(&self, response: &Value, observed: &'a str) -> &'a str {
+        if self.supports_composite_model_evidence() {
+            crate::codex::model_with_consistent_options(response, observed).unwrap_or(observed)
+        } else {
+            observed
+        }
+    }
+
+    fn session_model_id(&self, response: &Value, observed: &str) -> String {
+        self.product_model_id(self.reported_session_model_id(response, observed))
+    }
+
+    fn current_session_model_id(&self, response: &Value) -> Option<String> {
+        extract_current_model_id(response).map(|model| self.session_model_id(response, &model))
     }
 
     /// Whether this Agent's installed release replaces a Model its projected
@@ -14463,24 +14495,12 @@ impl AcpRuntimeClient {
             })?
             .to_string();
         let mut state = AcpAttachmentShared::default();
-        apply_session_state_to_attachment(
-            &mut state,
-            &process.agent_id,
-            process.auth_source.provider_profile_id(),
-            &native_session_id,
-            &result,
-        );
+        apply_session_state_to_attachment(&mut state, process, &native_session_id, &result);
         if let Some(commands) = process.take_pending_available_commands(&native_session_id) {
             state.available_commands = Some(commands);
         }
         if let Some(update) = trailing_config_update {
-            apply_session_state_to_attachment(
-                &mut state,
-                &process.agent_id,
-                process.auth_source.provider_profile_id(),
-                &native_session_id,
-                &update,
-            );
+            apply_session_state_to_attachment(&mut state, process, &native_session_id, &update);
         }
         // Copilot does not echo the process-scoped model in its ACP session
         // response. Preserve the launch selection as the effective model so
@@ -14602,13 +14622,7 @@ impl AcpRuntimeClient {
             })?
             .to_string();
         let mut state = AcpAttachmentShared::default();
-        apply_session_state_to_attachment(
-            &mut state,
-            &process.agent_id,
-            process.auth_source.provider_profile_id(),
-            &native_session_id,
-            &result,
-        );
+        apply_session_state_to_attachment(&mut state, process, &native_session_id, &result);
         if let Some(commands) = process.take_pending_available_commands(&native_session_id) {
             state.available_commands = Some(commands);
         }
@@ -14653,13 +14667,7 @@ impl AcpRuntimeClient {
             .await?;
         validate_restore_response(AcpOperation::SessionResume, &result, native_session_id)?;
         let mut state = AcpAttachmentShared::default();
-        apply_session_state_to_attachment(
-            &mut state,
-            &process.agent_id,
-            process.auth_source.provider_profile_id(),
-            native_session_id,
-            &result,
-        );
+        apply_session_state_to_attachment(&mut state, process, native_session_id, &result);
         if let Some(commands) = process.take_pending_available_commands(native_session_id) {
             state.available_commands = Some(commands);
         }
@@ -14737,13 +14745,7 @@ impl AcpRuntimeClient {
         }
         let replay_params = process.take_session_replay(native_session_id);
         let mut state = AcpAttachmentShared::default();
-        apply_session_state_to_attachment(
-            &mut state,
-            &process.agent_id,
-            process.auth_source.provider_profile_id(),
-            native_session_id,
-            &result,
-        );
+        apply_session_state_to_attachment(&mut state, process, native_session_id, &result);
         if let Some(commands) = process.take_pending_available_commands(native_session_id) {
             state.available_commands = Some(commands);
         }
@@ -15761,10 +15763,9 @@ impl AcpRuntimeClient {
                 let process_profile_id = process.auth_source.provider_profile_id().cloned();
                 let model_ids = extract_model_ids(response)
                     .into_iter()
-                    .map(|model| process.product_model_id(&model))
+                    .map(|model| process.session_model_id(response, &model))
                     .collect::<Vec<_>>();
-                let current_model_id = extract_current_model_id(response)
-                    .map(|model| process.product_model_id(&model));
+                let current_model_id = process.current_session_model_id(response);
                 let current_mode_id = extract_current_mode_id(response);
                 let mut discovery = extract_provider_session_config_state(
                     response,
@@ -15773,7 +15774,12 @@ impl AcpRuntimeClient {
                     Some(&current.native_session_id),
                 );
                 if let Some(discovery) = discovery.as_mut() {
-                    process.normalize_session_config_models(discovery);
+                    if let Some(model) = discovery.current_model.as_mut() {
+                        model.value = process.session_model_id(response, &model.value);
+                    }
+                    for model in &mut discovery.models {
+                        model.value = process.session_model_id(response, &model.value);
+                    }
                 }
                 if !model_ids.is_empty() {
                     state.model_ids = model_ids;
@@ -16491,20 +16497,42 @@ fn collapse_legacy_parameterized_model_ids(
 
 fn apply_session_state_to_attachment(
     state: &mut AcpAttachmentShared,
-    agent_id: &AgentId,
-    provider_profile_id: Option<&ProviderProfileId>,
+    process: &AcpProcess,
     native_session_id: &str,
     response: &Value,
 ) {
-    state.model_ids = extract_model_ids(response);
-    state.current_model_id = extract_current_model_id(response);
-    state.current_mode_id = extract_current_mode_id_for_agent(response, agent_id);
+    state.model_ids = extract_model_ids(response)
+        .into_iter()
+        .map(|model| {
+            process
+                .reported_session_model_id(response, &model)
+                .to_string()
+        })
+        .collect();
+    state.current_model_id = extract_current_model_id(response).map(|model| {
+        process
+            .reported_session_model_id(response, &model)
+            .to_string()
+    });
+    state.current_mode_id = extract_current_mode_id_for_agent(response, &process.agent_id);
     state.session_config_state = extract_provider_session_config_state(
         response,
-        Some(agent_id),
-        provider_profile_id,
+        Some(&process.agent_id),
+        process.auth_source.provider_profile_id(),
         Some(native_session_id),
     );
+    if let Some(config) = state.session_config_state.as_mut() {
+        if let Some(model) = config.current_model.as_mut() {
+            model.value = process
+                .reported_session_model_id(response, &model.value)
+                .to_string();
+        }
+        for model in &mut config.models {
+            model.value = process
+                .reported_session_model_id(response, &model.value)
+                .to_string();
+        }
+    }
 }
 
 fn apply_startup_model_to_attachment_state(process: &AcpProcess, state: &mut AcpAttachmentShared) {
@@ -17395,7 +17423,7 @@ fn runtime_config_response_conflict(
 ) -> Option<&'static str> {
     let target = field.value.as_deref()?;
     let explicit = match field.kind {
-        SessionConfigFieldKind::Model => extract_current_model_id(response),
+        SessionConfigFieldKind::Model => process.current_session_model_id(response),
         SessionConfigFieldKind::Mode => extract_current_mode_id(response),
         SessionConfigFieldKind::ReasoningEffort if process.agent_id.as_str() == "antigravity" => {
             extract_current_model_id(response)
@@ -17427,13 +17455,6 @@ fn runtime_config_response_conflict(
         }
     };
     explicit
-        .map(|value| {
-            if field.kind == SessionConfigFieldKind::Model {
-                process.product_model_id(&value)
-            } else {
-                value
-            }
-        })
         .filter(|value| value != target)
         .map(|_| "acp_session_config_response_mismatch")
 }
@@ -24026,6 +24047,327 @@ mod tests {
             let mut descriptor = terminal_auth_action_descriptor(request);
             descriptor.terminal_id = Some(terminal_id);
             Ok(descriptor)
+        }
+    }
+
+    mod codex_model {
+        use super::*;
+
+        fn process(outbound: Option<mpsc::UnboundedSender<String>>) -> Arc<AcpProcess> {
+            let mut process = test_process(
+                AcpProcessInstanceId::new(),
+                None,
+                outbound,
+                None,
+                Arc::new(DisabledAcpTerminalHost),
+                false,
+                false,
+            );
+            let process_mut = Arc::get_mut(&mut process).unwrap();
+            process_mut.agent_id = AgentId::parse("codex").unwrap();
+            process_mut.adapter_version = "2.12.0".to_string();
+            process_mut.compatibility_identity =
+                "adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0".to_string();
+            process_mut.startup_model = Some("provider/custom".to_string());
+            let shared = process_mut.shared.get_mut().unwrap();
+            shared.agent_name = Some(crate::registry::CODEX_ADAPTER_PACKAGE.to_string());
+            shared.agent_version = Some("2.12.0".to_string());
+            process
+        }
+
+        fn response(model: &str) -> Value {
+            json!({
+                "sessionId": "native-codex-model",
+                "models": {"currentModelId": format!("{model}[medium]")},
+                "configOptions": [{
+                    "id": "model", "category": "model", "label": "Model",
+                    "type": "select", "currentValue": model,
+                    "options": [{"value": model, "label": "Custom model"}]
+                }]
+            })
+        }
+
+        async fn attachment() -> (tempfile::TempDir, AcpRuntimeClient, AcpAttachmentHandle) {
+            let root = tempfile::tempdir().unwrap();
+            let client =
+                AcpRuntimeClient::new(ProviderConfigService::new(root.path().join("vibex.db")));
+            let process = process(None);
+            let mut snapshot = lifecycle_spawn_snapshot(
+                process.auth_source.provider_profile_id().unwrap().clone(),
+            );
+            snapshot.agent_id = process.agent_id.clone();
+            snapshot.adapter_id = AcpAdapterId::parse("codex-acp").unwrap();
+            snapshot.adapter_version = process.adapter_version.clone();
+            let snapshot = snapshot.with_content_revision();
+            let key = lifecycle_process_key(root.path(), &snapshot);
+            let lease = client
+                .process_registry
+                .acquire_reusable_with_snapshot(
+                    key,
+                    Some(snapshot),
+                    |instance_id| async move {
+                        let mut process = process;
+                        Arc::get_mut(&mut process).unwrap().process_instance_id = instance_id;
+                        Ok(process)
+                    },
+                    |_| async { Ok(()) },
+                )
+                .await
+                .unwrap();
+            let session_id = VibexSessionId::new();
+            let handle = register_lifecycle_attachment(&client, &session_id, lease, 1).await;
+            {
+                let payload = handle.payload();
+                let process = payload.process();
+                let mut state = payload.state.lock().unwrap();
+                apply_session_state_to_attachment(
+                    &mut state,
+                    &process,
+                    "native-codex-model",
+                    &response("provider/custom"),
+                );
+            }
+            client
+                .configure_attachment_runtime_state(&handle, AttachmentMutationMode::Current)
+                .unwrap();
+            (root, client, handle)
+        }
+
+        async fn select_model(
+            client: &AcpRuntimeClient,
+            handle: &AcpAttachmentHandle,
+            model: &str,
+        ) -> SessionRuntimeConfigMutationResult {
+            client
+                .apply_runtime_config_mutation(
+                    handle,
+                    SessionRuntimeConfigMutationRequest {
+                        session_id: handle.session_id().clone(),
+                        expected_revision: handle.payload().runtime_config_state().state_revision,
+                        expected_binding_id: handle.binding_id().clone(),
+                        expected_activation_generation: handle.fence().activation_generation as i64,
+                        patch: SessionRuntimeConfigPatch {
+                            model_id: Some(model.to_string()),
+                            ..Default::default()
+                        },
+                    },
+                    true,
+                    AttachmentMutationMode::Current,
+                )
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn new_resume_and_load_use_same_response_evidence() {
+            let root = tempfile::tempdir().unwrap();
+            let client =
+                AcpRuntimeClient::new(ProviderConfigService::new(root.path().join("vibex.db")));
+            for method in [
+                AcpOperation::SessionNew,
+                AcpOperation::SessionResume,
+                AcpOperation::SessionLoad,
+            ] {
+                let (outbound, mut receiver) = mpsc::unbounded_channel::<String>();
+                let process = process(Some(outbound));
+                let responder = process.clone();
+                let expected_method = method.method().to_string();
+                let task = tokio::spawn(async move {
+                    let line = timeout(Duration::from_secs(2), receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["method"], expected_method);
+                    responder
+                        .handle_response(
+                            &json!({"id": request["id"], "result": response("provider/custom")}),
+                        )
+                        .await;
+                });
+                let opened = match method {
+                    AcpOperation::SessionNew => {
+                        client.open_new_session_for_attachment(&process).await
+                    }
+                    AcpOperation::SessionResume => {
+                        client
+                            .resume_existing_session_for_attachment(&process, "native-codex-model")
+                            .await
+                    }
+                    _ => {
+                        client
+                            .load_existing_session_for_attachment(&process, "native-codex-model")
+                            .await
+                    }
+                }
+                .unwrap();
+                assert_eq!(
+                    opened.state.current_model_id.as_deref(),
+                    Some("provider/custom")
+                );
+                assert_eq!(
+                    opened
+                        .state
+                        .session_config_state
+                        .as_ref()
+                        .unwrap()
+                        .current_model
+                        .as_ref()
+                        .unwrap()
+                        .value,
+                    "provider/custom"
+                );
+                drop(opened);
+                timeout(Duration::from_secs(2), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn initial_selection_and_rebuild_converge_without_rpc() {
+            let (_root, client, handle) = attachment().await;
+            let initial = handle.payload().runtime_config_state();
+            assert_eq!(initial.effective_model.as_deref(), Some("provider/custom"));
+            assert!(initial.is_applied_to_generation(1));
+            assert_eq!(initial.effective_reasoning_effort, None);
+            for _ in 0..2 {
+                let result = select_model(&client, &handle, "provider/custom").await;
+                assert_eq!(result.outcomes.len(), 1);
+                assert_eq!(
+                    result.outcomes[0].status,
+                    SessionRuntimeConfigApplyStatus::NoOp
+                );
+                assert!(result.state.is_applied_to_generation(1));
+                client
+                    .configure_attachment_runtime_state(&handle, AttachmentMutationMode::Current)
+                    .unwrap();
+            }
+            let different = select_model(&client, &handle, "provider/different").await;
+            assert_eq!(
+                different.outcomes[0].status,
+                SessionRuntimeConfigApplyStatus::RestartRequired
+            );
+            assert_eq!(
+                different.state.effective_model.as_deref(),
+                Some("provider/custom")
+            );
+        }
+
+        #[tokio::test]
+        async fn config_updates_preserve_convergence_but_not_conflicting_evidence() {
+            let (_root, client, handle) = attachment().await;
+            let payload = handle.payload();
+            payload.replace_config_options(&response("provider/custom"));
+            assert_eq!(
+                payload.runtime_config_state().effective_model.as_deref(),
+                Some("provider/custom")
+            );
+            assert!(payload.runtime_config_state().is_applied_to_generation(1));
+            let mut conflict = response("provider/custom");
+            conflict["models"]["currentModelId"] = json!("provider/different[medium]");
+            payload.replace_config_options(&conflict);
+            assert_eq!(
+                payload.runtime_config_state().effective_model.as_deref(),
+                Some("provider/different[medium]")
+            );
+            assert!(!payload.runtime_config_state().is_applied_to_generation(1));
+            let result = select_model(&client, &handle, "provider/custom").await;
+            assert_eq!(
+                result.outcomes[0].status,
+                SessionRuntimeConfigApplyStatus::RestartRequired
+            );
+            let mut only_options = response("provider/custom");
+            only_options.as_object_mut().unwrap().remove("models");
+            payload.replace_config_options(&only_options);
+            assert!(payload.runtime_config_state().is_applied_to_generation(1));
+        }
+
+        #[test]
+        fn mutation_response_requires_matching_model_and_identity() {
+            let mut process = process(None);
+            let field = RuntimeConfigField {
+                key: CanonicalSessionConfigKey::parse("model").unwrap(),
+                kind: SessionConfigFieldKind::Model,
+                value: Some("provider/custom".to_string()),
+            };
+            let plan = SessionConfigPlan::RestartAndResume;
+            assert_eq!(
+                runtime_config_response_conflict(
+                    &process,
+                    &response("provider/custom"),
+                    &field,
+                    &plan
+                ),
+                None
+            );
+            assert_eq!(
+                runtime_config_response_conflict(
+                    &process,
+                    &response("provider/other"),
+                    &field,
+                    &plan
+                ),
+                Some("acp_session_config_response_mismatch")
+            );
+            let mut missing = response("provider/custom");
+            missing.as_object_mut().unwrap().remove("configOptions");
+            assert_eq!(
+                process.current_session_model_id(&missing).as_deref(),
+                Some("provider/custom[medium]")
+            );
+            for (agent, version, identity, reported_name, reported_version) in [
+                (
+                    "other",
+                    "2.12.0",
+                    "adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0",
+                    crate::registry::CODEX_ADAPTER_PACKAGE,
+                    "2.12.0",
+                ),
+                (
+                    "codex",
+                    "2.11.0",
+                    "adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0",
+                    crate::registry::CODEX_ADAPTER_PACKAGE,
+                    "2.12.0",
+                ),
+                (
+                    "codex",
+                    "2.12.0",
+                    "unmanaged",
+                    crate::registry::CODEX_ADAPTER_PACKAGE,
+                    "2.12.0",
+                ),
+                (
+                    "codex",
+                    "2.12.0",
+                    "adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0",
+                    "other",
+                    "2.12.0",
+                ),
+                (
+                    "codex",
+                    "2.12.0",
+                    "adapter=codex-acp@2.12.0;runtime=@openai/codex@0.171.0",
+                    crate::registry::CODEX_ADAPTER_PACKAGE,
+                    "2.13.0",
+                ),
+            ] {
+                let process_mut = Arc::get_mut(&mut process).unwrap();
+                process_mut.agent_id = AgentId::parse(agent).unwrap();
+                process_mut.adapter_version = version.to_string();
+                process_mut.compatibility_identity = identity.to_string();
+                let shared = process_mut.shared.get_mut().unwrap();
+                shared.agent_name = Some(reported_name.to_string());
+                shared.agent_version = Some(reported_version.to_string());
+                assert_eq!(
+                    process
+                        .current_session_model_id(&response("provider/custom"))
+                        .as_deref(),
+                    Some("provider/custom[medium]")
+                );
+            }
         }
     }
 

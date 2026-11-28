@@ -25,6 +25,61 @@ pub(crate) const CODEX_CONFIG_ENV_KEY: &str = "CODEX_CONFIG";
 /// startup override already named another model.
 pub(crate) const CODEX_LAUNCH_MODEL_SNAPSHOT_KEY: &str = "__vibex_codex_model";
 
+pub(crate) fn supports_composite_model_evidence(
+    agent_id: &str,
+    adapter_version: Option<&str>,
+    reported_name: Option<&str>,
+    reported_version: Option<&str>,
+) -> bool {
+    agent_id == crate::registry::CODEX_AGENT_ID
+        && adapter_version == Some("2.12.0")
+        && reported_name == Some(crate::registry::CODEX_ADAPTER_PACKAGE)
+        && reported_version == Some("2.12.0")
+}
+
+pub(crate) fn model_with_consistent_options<'a>(
+    response: &Value,
+    observed: &'a str,
+) -> Option<&'a str> {
+    let (model, suffix) = observed.split_once('[')?;
+    let effort = suffix.strip_suffix(']')?;
+    if model.is_empty()
+        || model.trim() != model
+        || model.contains(']')
+        || effort.is_empty()
+        || !effort
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return None;
+    }
+    let options = response.get("configOptions")?.as_array()?;
+    for (id, category, expected) in [
+        ("model", "model", model),
+        ("reasoning_effort", "thought_level", effort),
+    ] {
+        let mut matches = options.iter().filter(|option| {
+            option.get("id").and_then(Value::as_str) == Some(id)
+                || option.get("category").and_then(Value::as_str) == Some(category)
+        });
+        let Some(option) = matches.next() else {
+            if id == "reasoning_effort" {
+                continue;
+            }
+            return None;
+        };
+        if matches.next().is_some()
+            || option.get("id").and_then(Value::as_str) != Some(id)
+            || option.get("category").and_then(Value::as_str) != Some(category)
+            || option.get("type").and_then(Value::as_str) != Some("select")
+            || option.get("currentValue").and_then(Value::as_str) != Some(expected)
+        {
+            return None;
+        }
+    }
+    Some(model)
+}
+
 /// Merges a launch-selected model into the adapter's `CODEX_CONFIG` override.
 ///
 /// Codex applies a model before the session exists: the Provider projection

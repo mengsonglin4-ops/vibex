@@ -131,6 +131,12 @@ jobs:
       - name: Test ACP runtime probe isolation
         timeout-minutes: 5
         run: node scripts/run-model-review-tests.mjs --suite probe --phase test
+      - name: Compile Codex session model tests
+        timeout-minutes: 20
+        run: node scripts/run-model-review-tests.mjs --suite session --phase compile
+      - name: Test Codex session model convergence
+        timeout-minutes: 5
+        run: node scripts/run-model-review-tests.mjs --suite session --phase test
       - name: Compile runtime review tests
         timeout-minutes: 30
         run: node scripts/run-model-review-tests.mjs --suite runtime --phase compile
