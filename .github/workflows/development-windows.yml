@@ -125,6 +125,12 @@ jobs:
       - name: Test HostFile credentials
         timeout-minutes: 5
         run: node scripts/run-model-review-tests.mjs --suite credentials --phase test
+      - name: Compile ACP runtime probe tests
+        timeout-minutes: 20
+        run: node scripts/run-model-review-tests.mjs --suite probe --phase compile
+      - name: Test ACP runtime probe isolation
+        timeout-minutes: 5
+        run: node scripts/run-model-review-tests.mjs --suite probe --phase test
       - name: Compile runtime review tests
         timeout-minutes: 30
         run: node scripts/run-model-review-tests.mjs --suite runtime --phase compile

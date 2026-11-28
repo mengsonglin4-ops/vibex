@@ -13,7 +13,7 @@ installer/update policy remain separate.
   push.branches = [cloud-development]; workflow_dispatch
 cargo build -p vibex-desktop -p vibex-client --locked --jobs 2
 node scripts/package-development-windows.mjs --output <new-directory> [--binary-dir <debug-directory>]
-node scripts/run-model-review-tests.mjs --suite <git|config|credentials|runtime|backend|desktop> --phase <compile|test>
+node scripts/run-model-review-tests.mjs --suite <git|config|credentials|runtime|backend|desktop|probe> --phase <compile|test>
 Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
 ```
 
@@ -31,6 +31,7 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   bytes generated only when its build script also has debug assertions off.
   Require the Windows SDK `fxc.exe` and set `GPUI_FXC_PATH` explicitly.
 - Before building the portable executables, run the six model-review suites
+  and the ACP runtime-probe suite
   listed below, each in separate compile and test workflow steps. Compile with
   `cargo test --locked --no-run --message-format=json`, identify the unique
   requested test executable from Cargo artifacts, and record its suite, source
@@ -61,6 +62,11 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   allow five minutes including discovery and shutdown. Compilation has separate
   step limits (15/15/10/30/10/30 minutes for the suites in order), with a
   45-minute Preview build limit and the existing 120-minute overall limit.
+- ACP probe tests use `-p vibex-agent-acp --lib runtime_probe::tests`, with
+  separate 20-minute compile and five-minute test steps before the full build.
+  They share the same 180-second execution deadline and nonzero/no-ignored
+  gate. Run the existing six suites unchanged; passing them does not substitute
+  for probe isolation, projected Codex home and Windows junction regressions.
 - Restore Rust dependencies and build caches only after toolchain setup, using
   the pinned rust-cache action. Cache the two target directories separately and
   exclude Cargo binaries. Keys include the lockfile, toolchain, workflow,
@@ -131,6 +137,7 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   | `-p vibex-desktop-runtime --lib model_review` | Owner-bound single-use tickets, cancellation and report persistence. |
   | `-p vibex-backend --lib disconnected_review` | Offline review refuses local credential fallback. |
   | `-p vibex-desktop --lib model_review` | Selection and confirmation/cancellation state in `code_workbench::model_review`. |
+  | `-p vibex-agent-acp --lib runtime_probe::tests` | Probe evidence/lifecycle helpers, projected home selection, protected environment keys and Windows junction rejection; no real Agent or model request. |
 
   Desktop has an implicit Cargo library target at `apps/desktop/src/lib.rs`;
   its `code_workbench` module owns these tests. `--bin vibex-desktop` would

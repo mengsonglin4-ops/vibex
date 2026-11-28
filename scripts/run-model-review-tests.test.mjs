@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   SUITES, compileArguments, isWithin, matchesArtifact, parseArguments, parseListing,
@@ -126,7 +127,7 @@ test("argument parsing and exact compile selections include one optimization ove
   }
 });
 
-test("all six suites compile exact artifacts and directly discover/run with matching filters", async () => {
+test("all suites compile exact artifacts and directly discover/run with matching filters", async () => {
   for (const name of Object.keys(SUITES)) {
     const current = fixture(name);
     assert.deepEqual(await current.run("compile"), { outcome: "compiled", discovered: 0, passed: 0 });
@@ -143,6 +144,32 @@ test("all six suites compile exact artifacts and directly discover/run with matc
     assert.match(summary, /compile: compiled; \d+\.\d{2}s/);
     assert.match(summary, /test: passed; \d+\.\d{2}s; discovered 2, validated passed 2/);
     assert.doesNotMatch(summary, /fixture compiler stderr/);
+  }
+});
+
+test("ACP runtime probe suite is mandatory before portable build and uses its own filter", async () => {
+  assert.deepEqual(SUITES.probe, {
+    package: "vibex-agent-acp", target: "vibex_agent_acp", kind: "lib",
+    source: "crates/agent-acp/src/lib.rs", filter: "runtime_probe::tests"
+  });
+  assert.deepEqual(Object.keys(SUITES), ["git", "config", "credentials", "runtime", "backend", "desktop", "probe"]);
+  assert.deepEqual(parseArguments(["--suite", "probe", "--phase", "test"]), { suite: "probe", phase: "test", timeoutSeconds: 180 });
+  const workflow = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/development-windows.yml"), "utf8");
+  const compilePosition = workflow.indexOf("--suite probe --phase compile");
+  const testPosition = workflow.indexOf("--suite probe --phase test");
+  const buildPosition = workflow.indexOf("- name: Build desktop and terminal client");
+  assert.ok(compilePosition > 0 && compilePosition < testPosition && testPosition < buildPosition);
+  const gateStart = workflow.indexOf("- name: Compile ACP runtime probe tests");
+  const gateEnd = workflow.indexOf("- name: Compile runtime review tests", gateStart);
+  const gate = workflow.slice(gateStart, gateEnd);
+  assert.match(gate, /timeout-minutes: 20/);
+  assert.match(gate, /timeout-minutes: 5/);
+  assert.doesNotMatch(gate, /continue-on-error:|if:/);
+  const current = fixture("probe");
+  await current.run("compile");
+  for (const mode of ["zero", "ignored", "failed"]) {
+    current.state.mode = mode;
+    await assert.rejects(current.run("test"));
   }
 });
 

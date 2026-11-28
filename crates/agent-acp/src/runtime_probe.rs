@@ -40,7 +40,7 @@ use crate::runtime::{
     extract_current_model_id, extract_model_ids, validate_restore_response,
 };
 
-const PROBE_SOURCE_REVISION: &str = "runtime-probe-v2";
+const PROBE_SOURCE_REVISION: &str = "runtime-probe-v3";
 const MIN_DIAGNOSTIC_LEN: usize = 1;
 const PROBE_ENV_KEYS: &[&str] = &[
     "HOME",
@@ -454,6 +454,15 @@ impl AcpRuntimeClient {
         {
             crate::codex::upsert_codex_model_override(&mut env, model);
         }
+        let codex_home = probe_codex_home(
+            profile.agent_id.as_str(),
+            &root,
+            &home,
+            projection_context
+                .projection
+                .as_ref()
+                .map(|projection| projection.overlay_root.as_path()),
+        )?;
         add_isolation_environment(
             &mut env,
             &home,
@@ -461,6 +470,7 @@ impl AcpRuntimeClient {
             &data_home,
             &state_home,
             &cache_home,
+            &codex_home,
         );
         let cwd = workspace;
         let (strategy, fallback) = self.pool_decision(&profile_id, &config)?;
@@ -1012,6 +1022,70 @@ impl AcpRuntimeClient {
     }
 }
 
+fn probe_codex_home(
+    agent_id: &str,
+    root: &Path,
+    home: &Path,
+    projected_home: Option<&Path>,
+) -> VibexResult<PathBuf> {
+    let Some(projected_home) = projected_home.filter(|_| agent_id == "codex") else {
+        return Ok(home.to_path_buf());
+    };
+    let invalid_path = || {
+        VibexError::validation(
+            "agent_runtime_probe_projection_home_invalid",
+            "Codex probe projection home must be an isolated directory inside this probe",
+        )
+    };
+    let relative = projected_home
+        .strip_prefix(root)
+        .map_err(|_| invalid_path())?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(invalid_path());
+    }
+    let mut directory = root.to_path_buf();
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(component) = component {
+            directory.push(component);
+        }
+        let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+            VibexError::storage(
+                "agent_runtime_probe_projection_home_unavailable",
+                "failed to inspect Codex probe projection directory",
+            )
+            .with_diagnostic("errorKind", format!("{:?}", error.kind()))
+        })?;
+        let linked = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        let linked = {
+            use std::os::windows::fs::MetadataExt;
+            linked || metadata.file_attributes() & 0x400 != 0
+        };
+        if linked || !metadata.is_dir() {
+            return Err(invalid_path());
+        }
+    }
+    let resolve = |path: &Path| {
+        fs::canonicalize(path).map_err(|error| {
+            VibexError::storage(
+                "agent_runtime_probe_projection_home_unavailable",
+                "failed to resolve Codex probe projection directory",
+            )
+            .with_diagnostic("errorKind", format!("{:?}", error.kind()))
+        })
+    };
+    let resolved_root = resolve(root)?;
+    let resolved_home = resolve(projected_home)?;
+    if resolved_home == resolved_root || !resolved_home.starts_with(&resolved_root) {
+        return Err(invalid_path());
+    }
+    Ok(projected_home.to_path_buf())
+}
+
 fn add_isolation_environment(
     env: &mut Vec<(String, String)>,
     home: &Path,
@@ -1019,6 +1093,7 @@ fn add_isolation_environment(
     data: &Path,
     state: &Path,
     cache: &Path,
+    codex_home: &Path,
 ) {
     // Projection env is assembled from several sources and may contain the
     // same key more than once. Remove every protected entry before appending
@@ -1031,7 +1106,7 @@ fn add_isolation_environment(
         ("XDG_DATA_HOME", data),
         ("XDG_STATE_HOME", state),
         ("XDG_CACHE_HOME", cache),
-        ("CODEX_HOME", home),
+        ("CODEX_HOME", codex_home),
     ] {
         let value = value.to_string_lossy().into_owned();
         env.push((key.to_string(), value));
@@ -1766,41 +1841,179 @@ mod tests {
         let data = parent.path().join("data");
         let state = parent.path().join("state");
         let cache = parent.path().join("cache");
-        let mut env = vec![
-            ("HOME".to_string(), "/user/home".to_string()),
-            ("HOME".to_string(), "/shadow/home".to_string()),
-            ("Home".to_string(), "/windows-shadow/home".to_string()),
-            ("CODEX_HOME".to_string(), "/user/codex".to_string()),
-            (
-                "Codex_Home".to_string(),
-                "/windows-shadow/codex".to_string(),
-            ),
-            ("UNRELATED".to_string(), "keep".to_string()),
-        ];
+        let mut env = PROBE_ENV_KEYS
+            .iter()
+            .flat_map(|key| {
+                [
+                    (key.to_string(), "/user/home".to_string()),
+                    (key.to_ascii_lowercase(), "/shadow/home".to_string()),
+                ]
+            })
+            .collect::<Vec<_>>();
+        env.push(("UNRELATED".to_string(), "keep".to_string()));
 
-        add_isolation_environment(&mut env, &home, &config, &data, &state, &cache);
+        add_isolation_environment(&mut env, &home, &config, &data, &state, &cache, &home);
 
-        assert_eq!(
-            env.iter()
-                .filter(|(key, _)| key.eq_ignore_ascii_case("HOME"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            env.iter()
-                .filter(|(key, _)| key.eq_ignore_ascii_case("CODEX_HOME"))
-                .count(),
-            1
-        );
-        assert_eq!(
-            env.iter()
-                .find(|(key, _)| key == "HOME")
-                .map(|(_, value)| value),
-            Some(&home.to_string_lossy().into_owned())
-        );
+        for (key, expected) in [
+            ("HOME", &home),
+            ("USERPROFILE", &home),
+            ("XDG_CONFIG_HOME", &config),
+            ("XDG_DATA_HOME", &data),
+            ("XDG_STATE_HOME", &state),
+            ("XDG_CACHE_HOME", &cache),
+            ("CODEX_HOME", &home),
+        ] {
+            let entries = env
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(key))
+                .collect::<Vec<_>>();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].0, key);
+            assert_eq!(entries[0].1, expected.to_string_lossy());
+        }
         assert_eq!(
             env.iter().find(|(key, _)| key == "UNRELATED"),
             Some(&("UNRELATED".to_string(), "keep".to_string()))
         );
+    }
+
+    #[test]
+    fn codex_probe_home_preserves_materialized_config_and_catalog() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("probe");
+        let home = root.join("home");
+        let overlay = root.join("binding").join("workspace");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&overlay).unwrap();
+        fs::write(overlay.join("config.toml"), "model = \"fixture\"\n").unwrap();
+        fs::write(overlay.join("vibex-models.json"), "{\"models\":[]}").unwrap();
+        let codex_home = probe_codex_home("codex", &root, &home, Some(&overlay)).unwrap();
+        let mut env = vec![
+            ("CODEX_HOME".to_string(), "/user/codex".to_string()),
+            ("Codex_Home".to_string(), "/shadow/codex".to_string()),
+            ("HOME".to_string(), "/user/home".to_string()),
+            ("UNRELATED".to_string(), "keep".to_string()),
+        ];
+        add_isolation_environment(&mut env, &home, &home, &home, &home, &home, &codex_home);
+        let homes = env
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("CODEX_HOME"))
+            .collect::<Vec<_>>();
+        assert_eq!(homes.len(), 1);
+        let effective_home = Path::new(&homes[0].1);
+        assert_eq!(effective_home, overlay);
+        assert_eq!(
+            fs::read_to_string(effective_home.join("config.toml")).unwrap(),
+            "model = \"fixture\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(effective_home.join("vibex-models.json")).unwrap(),
+            "{\"models\":[]}"
+        );
+        assert!(!home.join("config.toml").exists());
+        assert!(env.contains(&("HOME".to_string(), home.to_string_lossy().into_owned())));
+        assert!(env.contains(&("UNRELATED".to_string(), "keep".to_string())));
+    }
+
+    #[test]
+    fn codex_probe_home_fallback_does_not_trust_environment_or_other_agents() {
+        let parent = tempdir().unwrap();
+        let home = parent.path().join("home");
+        let outside = parent.path().join("outside");
+        assert_eq!(
+            probe_codex_home("codex", parent.path(), &home, None).unwrap(),
+            home
+        );
+        assert_eq!(
+            probe_codex_home("deepseek-harness", parent.path(), &home, Some(&outside)).unwrap(),
+            home
+        );
+        let mut env = vec![("DSH_HOME".to_string(), "projected-dsh-home".to_string())];
+        add_isolation_environment(&mut env, &home, &home, &home, &home, &home, &home);
+        assert!(env.contains(&("DSH_HOME".to_string(), "projected-dsh-home".to_string())));
+        assert!(env.contains(&(
+            "CODEX_HOME".to_string(),
+            home.to_string_lossy().into_owned()
+        )));
+    }
+
+    #[test]
+    fn codex_probe_home_rejects_outside_root_and_parent_components() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("probe");
+        let outside = parent.path().join("probe-other");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        for overlay in [&outside, &root, &root.join("..").join("probe-other")] {
+            let error =
+                probe_codex_home("codex", &root, &root.join("home"), Some(overlay)).unwrap_err();
+            assert_eq!(error.code, "agent_runtime_probe_projection_home_invalid");
+        }
+    }
+
+    #[test]
+    fn codex_probe_home_rejects_missing_and_file_targets() {
+        let parent = tempdir().unwrap();
+        let root = parent.path();
+        let home = root.join("home");
+        let missing =
+            probe_codex_home("codex", root, &home, Some(&root.join("missing"))).unwrap_err();
+        assert_eq!(
+            missing.code,
+            "agent_runtime_probe_projection_home_unavailable"
+        );
+        let file = root.join("file");
+        fs::write(&file, "fixture").unwrap();
+        let error = probe_codex_home("codex", root, &home, Some(&file)).unwrap_err();
+        assert_eq!(error.code, "agent_runtime_probe_projection_home_invalid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_probe_home_rejects_linked_directories() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("probe");
+        let outside = parent.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let linked = root.join("linked");
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        let error =
+            probe_codex_home("codex", &root, &root.join("home"), Some(&linked)).unwrap_err();
+        assert_eq!(error.code, "agent_runtime_probe_projection_home_invalid");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_probe_home_rejects_windows_junctions_at_root_and_ancestor() {
+        use std::os::windows::process::CommandExt;
+
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("probe");
+        let outside = parent.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(outside.join("workspace")).unwrap();
+        let linked = root.join("linked");
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path $env:VIBEX_TEST_JUNCTION -Target $env:VIBEX_TEST_TARGET | Out-Null",
+            ])
+            .env("VIBEX_TEST_JUNCTION", &linked)
+            .env("VIBEX_TEST_TARGET", &outside)
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction fixture creation failed");
+        for probe_root in [&root, &linked] {
+            let error = probe_codex_home(
+                "codex",
+                probe_root,
+                &root.join("home"),
+                Some(&linked.join("workspace")),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "agent_runtime_probe_projection_home_invalid");
+        }
     }
 }

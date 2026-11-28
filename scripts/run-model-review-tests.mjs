@@ -11,7 +11,8 @@ export const SUITES = {
   credentials: { package: "vibex-config-switch", target: "model_review_credentials", kind: "test", source: "crates/config-switch/tests/model_review_credentials.rs", filter: "model_review" },
   runtime: { package: "vibex-desktop-runtime", target: "vibex_desktop_runtime", kind: "lib", source: "crates/desktop-runtime/src/lib.rs", filter: "model_review" },
   backend: { package: "vibex-backend", target: "vibex_backend", kind: "lib", source: "crates/vibex-backend/src/lib.rs", filter: "disconnected_review" },
-  desktop: { package: "vibex-desktop", target: "vibex_desktop", kind: "lib", source: "apps/desktop/src/lib.rs", filter: "model_review" }
+  desktop: { package: "vibex-desktop", target: "vibex_desktop", kind: "lib", source: "apps/desktop/src/lib.rs", filter: "model_review" },
+  probe: { package: "vibex-agent-acp", target: "vibex_agent_acp", kind: "lib", source: "crates/agent-acp/src/lib.rs", filter: "runtime_probe::tests" }
 };
 
 export function parseArguments(argv) {
@@ -19,7 +20,7 @@ export function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
     if (!["--suite", "--phase", "--timeout-seconds"].includes(key) || !argv[index + 1] || values[key] !== undefined) {
-      throw new Error("Usage: --suite <git|config|credentials|runtime|backend|desktop> --phase <compile|test> [--timeout-seconds <positive number>]");
+      throw new Error("Usage: --suite <git|config|credentials|runtime|backend|desktop|probe> --phase <compile|test> [--timeout-seconds <positive number>]");
     }
     values[key] = argv[index + 1];
   }

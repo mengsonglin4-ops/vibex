@@ -5083,6 +5083,16 @@ check:agent-provider-runtime[:self-test]
   `USERPROFILE`, XDG config/data/state/cache homes, and `CODEX_HOME`, then append
   exactly one probe-owned value for each. Duplicate keys must not allow a later
   value to escape the isolated root.
+- For a Codex runtime probe with a materialized projection, the final
+  `CODEX_HOME` must be that projection's overlay directory, not the empty
+  generic probe home. Select it from the resolved projection object, never
+  from inherited environment values. Reject a non-descendant, parent traversal,
+  missing/file target, symlink, or Windows reparse directory before spawning;
+  verify canonical containment as well. Without a Codex projection, retain the
+  generic probe home. Keep all protected-key duplicate removal intact.
+- `runtime-probe-v3` distinguishes this home-selection behavior from older
+  evidence. Regressions must read the materialized config and model catalog
+  through the final environment and cover isolation rejection and fallback.
 - `SessionResume` evidence requires an actual successful negotiated
   `session/resume` or `session/load` request against the probe session. An
   advertised capability alone is not evidence; method-not-found is
