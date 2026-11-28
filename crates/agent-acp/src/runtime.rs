@@ -34298,6 +34298,7 @@ for line in sys.stdin:
     /// blocking requests: a `method-not-found` reply fails the agent's own
     /// tool call and, for the plan case, strands it in plan mode. Both must
     /// reach the elicitation surface and answer in Grok's own encoding.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn grok_blocking_host_requests_bridge_to_elicitation_and_answer_in_its_dialect() {
         let agent_id = AgentId::parse(GROK_AGENT_ID).unwrap();

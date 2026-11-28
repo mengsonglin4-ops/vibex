@@ -67,6 +67,11 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   They share the same 180-second execution deadline and nonzero/no-ignored
   gate. Run the existing six suites unchanged; passing them does not substitute
   for probe isolation, projected Codex home and Windows junction regressions.
+- Cargo builds the entire library test target before applying a test-name
+  filter. Tests using a Unix-only shebang fixture must carry the same Unix
+  compilation condition as that fixture. Do not replace it with an interpreter
+  invocation that misroutes Agent-prepended flags, or drop the Windows probe
+  gate to hide a library-test compilation failure.
 - Restore Rust dependencies and build caches only after toolchain setup, using
   the pinned rust-cache action. Cache the two target directories separately and
   exclude Cargo binaries. Keys include the lockfile, toolchain, workflow,
