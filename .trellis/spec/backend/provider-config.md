@@ -5090,9 +5090,29 @@ check:agent-provider-runtime[:self-test]
   missing/file target, symlink, or Windows reparse directory before spawning;
   verify canonical containment as well. Without a Codex projection, retain the
   generic probe home. Keep all protected-key duplicate removal intact.
-- `runtime-probe-v3` distinguishes this home-selection behavior from older
-  evidence. Regressions must read the materialized config and model catalog
-  through the final environment and cover isolation rejection and fallback.
+- `runtime-probe-v4` retains the v3 home-selection behavior and separates
+  Codex Adapter identity from underlying Agent identity. Codex ACP's
+  `agentInfo.version` identifies the Adapter; it must not be compared with or
+  persisted as the underlying Codex version. Missing underlying version
+  evidence remains blocked, even when the expected version is known locally.
+  A reported Adapter mismatch fails independently. Malformed version strings
+  are rejected, not transformed into matching identities by character removal.
+- Codex startup model evidence comes from the final launch environment, not
+  unresolved Profile environment references. Require one selected model, a
+  nonempty effective `CODEX_HOME`, and a matching `CODEX_CONFIG.model` override.
+  Resolve duplicate keys using child-process ordering and platform case rules.
+  A discovery catalog or an isolated empty home alone is not model evidence.
+  An explicit conflicting session model fails even when the startup override
+  matches the requested model.
+  Regressions must also retain materialized config/catalog reads, isolation
+  rejection, fallback, and unchanged Copilot startup arguments.
+- Adapter authentication status that labels a configured custom gateway is
+  not proof that its credentials were accepted upstream. Likewise a
+  `providers/list` response describing a configurable slot or fallback URL is
+  not necessarily the session's effective route. Do not promote these to
+  authentication or provider success without a version-specific evidence
+  contract. No login, logout, provider mutation, or model prompt is added to
+  compensate for missing readonly evidence.
 - `SessionResume` evidence requires an actual successful negotiated
   `session/resume` or `session/load` request against the probe session. An
   advertised capability alone is not evidence; method-not-found is

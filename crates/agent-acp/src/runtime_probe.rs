@@ -40,7 +40,7 @@ use crate::runtime::{
     extract_current_model_id, extract_model_ids, validate_restore_response,
 };
 
-const PROBE_SOURCE_REVISION: &str = "runtime-probe-v3";
+const PROBE_SOURCE_REVISION: &str = "runtime-probe-v4";
 const MIN_DIAGNOSTIC_LEN: usize = 1;
 const PROBE_ENV_KEYS: &[&str] = &[
     "HOME",
@@ -567,12 +567,24 @@ impl AcpRuntimeClient {
                     timeout_duration.min(ACP_PROBE_TIMEOUT),
                 )
                 .await?;
-            let agent_version = extract_reported_agent_version(&initialize)
-                .map(safe_identity_value)
-                .filter(|value| !value.is_empty());
-            let adapter_version = runtime.version_identity.adapter_version.clone();
+            let identity = &runtime.version_identity;
+            let agent_id = identity.route.agent_id.as_str();
+            let agent_version = extract_reported_agent_version(agent_id, &initialize)
+                .and_then(safe_version_value)
+                .map(ToString::to_string);
+            let adapter_version = if agent_id == "codex" {
+                extract_reported_adapter_version(&initialize)
+                    .and_then(safe_version_value)
+                    .map(ToString::to_string)
+            } else {
+                identity.adapter_version.clone()
+            };
             let mut facts = vec![
-                binary_identity_fact(runtime, agent_version.as_deref()),
+                binary_identity_fact(
+                    identity,
+                    agent_version.as_deref(),
+                    adapter_version.as_deref(),
+                ),
                 AgentRuntimeProbeFact::passed(AgentRuntimeProbeCapability::AcpHandshake),
             ];
             record.facts = facts.clone();
@@ -659,15 +671,11 @@ impl AcpRuntimeClient {
                 } else if selection_strategy == ModelSelectionStrategy::StartupProjection
                     || is_copilot
                 {
-                    if startup_model == Some(model) {
-                        AgentRuntimeProbeFact::passed(AgentRuntimeProbeCapability::ModelSelection)
-                    } else {
-                        AgentRuntimeProbeFact {
-                            capability: AgentRuntimeProbeCapability::ModelSelection,
-                            status: AgentRuntimeProbeFactStatus::Failed,
-                            diagnostic_code: Some("startup_model_not_applied".to_string()),
-                        }
-                    }
+                    classify_startup_model(
+                        model,
+                        startup_model,
+                        extract_current_model_id(&session).as_deref(),
+                    )
                 } else {
                     let result = process
                         .request(
@@ -1277,6 +1285,28 @@ fn classify_authentication(
     }
 }
 
+fn classify_startup_model(
+    target_model: &str,
+    startup_model: Option<&str>,
+    observed_model: Option<&str>,
+) -> AgentRuntimeProbeFact {
+    if observed_model.is_some_and(|model| model != target_model) {
+        AgentRuntimeProbeFact {
+            capability: AgentRuntimeProbeCapability::ModelSelection,
+            status: AgentRuntimeProbeFactStatus::Failed,
+            diagnostic_code: Some("startup_model_mismatch".to_string()),
+        }
+    } else if startup_model == Some(target_model) {
+        AgentRuntimeProbeFact::passed(AgentRuntimeProbeCapability::ModelSelection)
+    } else {
+        AgentRuntimeProbeFact {
+            capability: AgentRuntimeProbeCapability::ModelSelection,
+            status: AgentRuntimeProbeFactStatus::Failed,
+            diagnostic_code: Some("startup_model_not_applied".to_string()),
+        }
+    }
+}
+
 fn effective_provider_fact(
     initialize: &Value,
     session: &Value,
@@ -1372,27 +1402,52 @@ fn normalize_provider_identity(value: &str) -> Option<String> {
     Some(url.origin().ascii_serialization().to_ascii_lowercase())
 }
 
-fn extract_reported_agent_version(initialize: &Value) -> Option<&str> {
+fn extract_reported_adapter_version(initialize: &Value) -> Option<&str> {
     initialize
         .get("agentInfo")
         .and_then(|info| info.get("version"))
         .and_then(Value::as_str)
-        .or_else(|| {
-            initialize
-                .get("_meta")
-                .and_then(|meta| meta.get("agentVersion"))
-                .and_then(Value::as_str)
-        })
+}
+
+fn extract_reported_agent_version<'a>(agent_id: &str, initialize: &'a Value) -> Option<&'a str> {
+    let metadata_version = initialize
+        .get("_meta")
+        .and_then(|meta| meta.get("agentVersion"))
+        .and_then(Value::as_str);
+    if agent_id == "codex" {
+        metadata_version
+    } else {
+        extract_reported_adapter_version(initialize).or(metadata_version)
+    }
 }
 
 fn binary_identity_fact(
-    runtime: &AgentRuntimeProfile,
+    identity: &vibex_core::AgentRuntimeVersionIdentity,
     observed_agent_version: Option<&str>,
+    observed_adapter_version: Option<&str>,
 ) -> AgentRuntimeProbeFact {
-    match (
-        runtime.version_identity.agent_version.as_deref(),
-        observed_agent_version,
-    ) {
+    if identity.route.agent_id.as_str() == "codex" {
+        match (
+            identity.adapter_version.as_deref(),
+            observed_adapter_version,
+        ) {
+            (Some(expected), Some(observed)) if expected != observed => {
+                return AgentRuntimeProbeFact {
+                    capability: AgentRuntimeProbeCapability::BinaryIdentity,
+                    status: AgentRuntimeProbeFactStatus::Failed,
+                    diagnostic_code: Some("adapter_version_mismatch".to_string()),
+                };
+            }
+            (_, None) => {
+                return AgentRuntimeProbeFact::blocked(
+                    AgentRuntimeProbeCapability::BinaryIdentity,
+                    "adapter_version_not_reported",
+                );
+            }
+            _ => {}
+        }
+    }
+    match (identity.agent_version.as_deref(), observed_agent_version) {
         (Some(expected), Some(observed)) if expected == observed => {
             AgentRuntimeProbeFact::passed(AgentRuntimeProbeCapability::BinaryIdentity)
         }
@@ -1495,15 +1550,14 @@ fn safe_code(code: &str) -> String {
     value
 }
 
-fn safe_identity_value(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .filter(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '@' | '+' | '/')
-        })
-        .take(192)
-        .collect()
+fn safe_version_value(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 192
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '+')
+        }))
+    .then_some(value)
 }
 
 fn materialized_probe_process_args(
@@ -1582,22 +1636,247 @@ mod tests {
             classify_authentication(Some(true), false).status,
             AgentRuntimeProbeFactStatus::Passed
         );
+        assert_eq!(
+            classify_authentication(Some(false), true).status,
+            AgentRuntimeProbeFactStatus::Failed
+        );
     }
 
     #[test]
     fn reported_agent_version_accepts_standard_and_grok_metadata() {
         assert_eq!(
-            extract_reported_agent_version(&json!({
-                "agentInfo": {"version": "2.0.0"},
-                "_meta": {"agentVersion": "1.0.8"}
-            })),
+            extract_reported_agent_version(
+                "fixture",
+                &json!({
+                    "agentInfo": {"version": "2.0.0"},
+                    "_meta": {"agentVersion": "1.0.8"}
+                })
+            ),
             Some("2.0.0")
         );
         assert_eq!(
-            extract_reported_agent_version(&json!({
-                "_meta": {"agentVersion": "1.0.8"}
-            })),
+            extract_reported_agent_version(
+                "grok",
+                &json!({
+                    "_meta": {"agentVersion": "1.0.8"}
+                })
+            ),
             Some("1.0.8")
+        );
+    }
+
+    fn codex_identity() -> vibex_core::AgentRuntimeVersionIdentity {
+        vibex_core::AgentRuntimeVersionIdentity {
+            route: vibex_core::AgentRuntimeRouteKey {
+                agent_id: AgentId::parse("codex").unwrap(),
+                transport_kind: vibex_core::TransportKind::Acp,
+                adapter_id: AcpAdapterId::parse("codex-acp").unwrap(),
+            },
+            adapter_version: Some("2.12.0".to_string()),
+            agent_version: Some("0.171.0".to_string()),
+            runtime_dependencies: BTreeMap::new(),
+            source: vibex_core::AgentVersionSource::Managed,
+        }
+    }
+
+    #[test]
+    fn codex_adapter_version_is_not_underlying_agent_evidence() {
+        let initialize = json!({"agentInfo": {"version": "2.12.0"}});
+        let agent_version = extract_reported_agent_version("codex", &initialize);
+        let adapter_version = extract_reported_adapter_version(&initialize);
+        assert_eq!(agent_version, None);
+        assert_eq!(adapter_version, Some("2.12.0"));
+        let fact = binary_identity_fact(&codex_identity(), agent_version, adapter_version);
+        assert_eq!(fact.status, AgentRuntimeProbeFactStatus::Blocked);
+        assert_eq!(
+            fact.diagnostic_code.as_deref(),
+            Some("agent_version_not_reported")
+        );
+    }
+
+    #[test]
+    fn codex_identity_checks_each_reported_version_independently() {
+        let identity = codex_identity();
+        let initialize = json!({
+            "agentInfo": {"version": "2.12.0"},
+            "_meta": {"agentVersion": "0.171.0"}
+        });
+        assert_eq!(
+            binary_identity_fact(
+                &identity,
+                extract_reported_agent_version("codex", &initialize),
+                extract_reported_adapter_version(&initialize),
+            )
+            .status,
+            AgentRuntimeProbeFactStatus::Passed
+        );
+        for (agent, adapter, status, code) in [
+            (
+                Some("0.171.0"),
+                Some("2.11.0"),
+                AgentRuntimeProbeFactStatus::Failed,
+                "adapter_version_mismatch",
+            ),
+            (
+                Some("0.170.0"),
+                Some("2.12.0"),
+                AgentRuntimeProbeFactStatus::Failed,
+                "agent_version_mismatch",
+            ),
+            (
+                Some("0.171.0"),
+                None,
+                AgentRuntimeProbeFactStatus::Blocked,
+                "adapter_version_not_reported",
+            ),
+            (
+                None,
+                Some("2.12.0"),
+                AgentRuntimeProbeFactStatus::Blocked,
+                "agent_version_not_reported",
+            ),
+        ] {
+            let fact = binary_identity_fact(&identity, agent, adapter);
+            assert_eq!(fact.status, status);
+            assert_eq!(fact.diagnostic_code.as_deref(), Some(code));
+        }
+    }
+
+    #[test]
+    fn malformed_versions_are_rejected_not_sanitized_into_matches() {
+        for value in [
+            "",
+            " ",
+            "0.17!1.0",
+            "0.171.0\nsecret",
+            "https://fixture.invalid",
+            "C:\\private",
+        ] {
+            assert_eq!(safe_version_value(value), None);
+        }
+        assert_eq!(safe_version_value(&"1".repeat(193)), None);
+        assert_eq!(safe_version_value(" 0.171.0 "), Some("0.171.0"));
+        assert_eq!(
+            safe_version_value("0.171.0-alpha.1+build.2"),
+            Some("0.171.0-alpha.1+build.2")
+        );
+        let malformed = json!({"agentInfo": {"version": 2}, "_meta": {"agentVersion": false}});
+        assert_eq!(extract_reported_agent_version("codex", &malformed), None);
+        assert_eq!(extract_reported_adapter_version(&malformed), None);
+    }
+
+    fn codex_launch_config() -> AcpProviderConfig {
+        AcpProviderConfig {
+            command: "fixture".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd_template: None,
+            process_strategy: AcpProcessStrategy::PerSession,
+            terminal_tools: false,
+            terminal_auth: false,
+            models: vec!["target-model".to_string()],
+            modes: Vec::new(),
+            features: Vec::new(),
+            disabled_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn codex_startup_model_uses_final_materialized_environment() {
+        let config = codex_launch_config();
+        let mut env = vec![("CODEX_HOME".to_string(), "probe-overlay".to_string())];
+        crate::codex::upsert_codex_model_override(&mut env, "target-model");
+        assert!(config.env.is_empty());
+        assert_eq!(
+            crate::runtime::startup_model_from_launch(&config, "codex", &env).as_deref(),
+            Some("target-model")
+        );
+        env.push((
+            "CODEX_CONFIG".to_string(),
+            json!({"model": "other-model"}).to_string(),
+        ));
+        assert_eq!(
+            crate::runtime::startup_model_from_launch(&config, "codex", &env),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_startup_model_rejects_discovery_and_missing_launch_evidence() {
+        let config = codex_launch_config();
+        let home = ("CODEX_HOME".to_string(), "probe-overlay".to_string());
+        let model = (
+            "CODEX_CONFIG".to_string(),
+            json!({"model": "target-model"}).to_string(),
+        );
+        for env in [
+            Vec::new(),
+            vec![home.clone()],
+            vec![model.clone()],
+            vec![("CODEX_HOME".to_string(), " ".to_string()), model.clone()],
+            vec![
+                home.clone(),
+                ("CODEX_CONFIG".to_string(), "invalid".to_string()),
+            ],
+            vec![home.clone(), ("CODEX_CONFIG".to_string(), "[]".to_string())],
+        ] {
+            assert_eq!(
+                crate::runtime::startup_model_from_launch(&config, "codex", &env),
+                None
+            );
+        }
+        let mut discovery = config;
+        discovery.models.push("another-model".to_string());
+        assert_eq!(
+            crate::runtime::startup_model_from_launch(&discovery, "codex", &[home, model]),
+            None
+        );
+    }
+
+    #[test]
+    fn codex_startup_model_honors_platform_environment_key_rules() {
+        let env = vec![
+            ("CODEX_HOME".to_string(), "probe-overlay".to_string()),
+            (
+                "CODEX_CONFIG".to_string(),
+                json!({"model": "target-model"}).to_string(),
+            ),
+            (
+                "codex_config".to_string(),
+                json!({"model": "other-model"}).to_string(),
+            ),
+        ];
+        assert_eq!(
+            crate::runtime::startup_model_from_launch(&codex_launch_config(), "codex", &env)
+                .as_deref(),
+            if cfg!(windows) {
+                None
+            } else {
+                Some("target-model")
+            }
+        );
+    }
+
+    #[test]
+    fn startup_projection_cannot_override_a_conflicting_session_model() {
+        for observed in [None, Some("target-model")] {
+            assert_eq!(
+                classify_startup_model("target-model", Some("target-model"), observed).status,
+                AgentRuntimeProbeFactStatus::Passed
+            );
+        }
+        let mismatch =
+            classify_startup_model("target-model", Some("target-model"), Some("other-model"));
+        assert_eq!(mismatch.status, AgentRuntimeProbeFactStatus::Failed);
+        assert_eq!(
+            mismatch.diagnostic_code.as_deref(),
+            Some("startup_model_mismatch")
+        );
+        assert_eq!(
+            classify_startup_model("target-model", None, Some("target-model"))
+                .diagnostic_code
+                .as_deref(),
+            Some("startup_model_not_applied")
         );
     }
 
@@ -1828,7 +2107,7 @@ mod tests {
 
         assert_eq!(config.args, vec!["--acp", "--model", "target-model"]);
         assert_eq!(
-            crate::runtime::startup_model_from_config(&config, "copilot").as_deref(),
+            crate::runtime::startup_model_from_launch(&config, "copilot", &[]).as_deref(),
             Some("target-model")
         );
     }
@@ -1894,7 +2173,14 @@ mod tests {
             ("HOME".to_string(), "/user/home".to_string()),
             ("UNRELATED".to_string(), "keep".to_string()),
         ];
+        let mut config = codex_launch_config();
+        apply_startup_model_to_config(&mut config, "codex", Some("fixture"));
+        crate::codex::upsert_codex_model_override(&mut env, "fixture");
         add_isolation_environment(&mut env, &home, &home, &home, &home, &home, &codex_home);
+        assert_eq!(
+            crate::runtime::startup_model_from_launch(&config, "codex", &env).as_deref(),
+            Some("fixture")
+        );
         let homes = env
             .iter()
             .filter(|(key, _)| key.eq_ignore_ascii_case("CODEX_HOME"))

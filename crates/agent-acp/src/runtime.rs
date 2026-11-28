@@ -424,9 +424,10 @@ pub(crate) fn apply_startup_model_to_config(
     config.args = args;
 }
 
-pub(crate) fn startup_model_from_config(
+pub(crate) fn startup_model_from_launch(
     config: &AcpProviderConfig,
     agent_id: &str,
+    env: &[(String, String)],
 ) -> Option<String> {
     if agent_id == "antigravity" {
         return config
@@ -436,16 +437,30 @@ pub(crate) fn startup_model_from_config(
             .filter(|model| !model.is_empty())
             .map(ToString::to_string);
     }
-    // A Codex model is a startup guarantee only for a real Provider projection.
-    // Generic ACP test/profile configs may carry discovery models without a
-    // projected Codex state home.
-    if agent_id == "codex" && config.env.iter().any(|entry| entry.key == "CODEX_HOME") {
-        return config
-            .models
-            .first()
-            .map(|model| model.trim())
-            .filter(|model| !model.is_empty())
-            .map(ToString::to_string);
+    if agent_id == "codex" {
+        let [model] = config.models.as_slice() else {
+            return None;
+        };
+        let model = model.trim();
+        let effective_env = |name: &str| {
+            env.iter()
+                .rev()
+                .find(|(key, _)| {
+                    if cfg!(windows) {
+                        key.eq_ignore_ascii_case(name)
+                    } else {
+                        key == name
+                    }
+                })
+                .map(|(_, value)| value.as_str())
+        };
+        if model.is_empty() || effective_env("CODEX_HOME")?.trim().is_empty() {
+            return None;
+        }
+        let overrides: Value =
+            serde_json::from_str(effective_env(crate::codex::CODEX_CONFIG_ENV_KEY)?).ok()?;
+        return (overrides.get("model").and_then(Value::as_str) == Some(model))
+            .then(|| model.to_string());
     }
     if agent_id != "copilot" {
         return None;
@@ -13782,7 +13797,6 @@ impl AcpRuntimeClient {
         } = launch;
         let agent_id = agent_id.clone();
         let adapter_identity = self.effective_adapter_identity(&agent_id, config)?;
-        let startup_model = startup_model_from_config(config, agent_id.as_str());
         let claude_session_settings = claude_session::session_settings_meta(&agent_id, config);
         let claude_alias_slots = claude_session::model_alias_slots(&agent_id, config);
         let model_id_projection = match auth_source {
@@ -13866,6 +13880,7 @@ impl AcpRuntimeClient {
                 }
             },
         };
+        let startup_model = startup_model_from_launch(config, agent_id.as_str(), &env_overlays);
         let mut command = Command::new(&config.command);
         command
             .args(&process_args)
