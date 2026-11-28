@@ -152,7 +152,7 @@ test("ACP runtime probe suite is mandatory before portable build and uses its ow
     package: "vibex-agent-acp", target: "vibex_agent_acp", kind: "lib",
     source: "crates/agent-acp/src/lib.rs", filter: "runtime_probe::tests"
   });
-  assert.deepEqual(Object.keys(SUITES), ["git", "config", "credentials", "runtime", "backend", "desktop", "probe", "session"]);
+  assert.deepEqual(Object.keys(SUITES), ["git", "config", "credentials", "runtime", "backend", "desktop", "probe", "session", "dsh"]);
   assert.deepEqual(parseArguments(["--suite", "probe", "--phase", "test"]), { suite: "probe", phase: "test", timeoutSeconds: 180 });
   const workflow = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/development-windows.yml"), "utf8");
   const compilePosition = workflow.indexOf("--suite probe --phase compile");
@@ -171,6 +171,19 @@ test("ACP runtime probe suite is mandatory before portable build and uses its ow
     current.state.mode = mode;
     await assert.rejects(current.run("test"));
   }
+});
+
+test("DSH credential isolation is a mandatory Windows gate", () => {
+  assert.deepEqual(SUITES.dsh, {
+    package: "vibex-config-switch", target: "vibex_config_switch", kind: "lib",
+    source: "crates/config-switch/src/lib.rs", filter: "deepseek_harness"
+  });
+  const workflow = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../.github/workflows/development-windows.yml"), "utf8");
+  const compilePosition = workflow.indexOf("--suite dsh --phase compile");
+  const testPosition = workflow.indexOf("--suite dsh --phase test");
+  const buildPosition = workflow.indexOf("- name: Build desktop and terminal client");
+  assert.ok(compilePosition > 0 && compilePosition < testPosition && testPosition < buildPosition);
+  assert.doesNotMatch(workflow.slice(workflow.indexOf("- name: Compile DSH projection tests"), testPosition), /continue-on-error:|if:/);
 });
 
 test("Codex live session convergence is a separate mandatory Windows gate", async () => {

@@ -186,6 +186,19 @@ if (process.platform === "win32") {
 const AMP_CLI_PACKAGE: &str = "@ampcode/cli";
 const CODEWHALE_CLI_PACKAGE: &str = "codewhale";
 const DEEPSEEK_HARNESS_ACP_PACKAGE: &str = "@openma/deepseek-harness-acp";
+const DSH_SINGLE_MODEL_PATCH_REVISION: &str = "dsh-acp-0.4.43-single-model-v1";
+const DSH_SERVER_SHA256: &str = "33b8ef47a7a270c73616ec1f18f2af64bf29f578448700eb97b9371530546f1d";
+const DSH_SINGLE_MODEL_SOURCES: &[(&str, &str)] = &[
+    ("server.js", DSH_SERVER_SHA256),
+    (
+        "plugin.js",
+        "0f26faea2ada125127cb89e1e5f6c2360b330afc3a97b6de0a9b4348c7d42358",
+    ),
+    (
+        "bridge.js",
+        "dd62dfe8085ef853c5b5743cccf70ad7cbe9954e0b1631f626fa1d5ec47a1fcb",
+    ),
+];
 const HERMES_CLI_PACKAGE: &str = "hermes-agent";
 /// The newest `hermes-agent` release published on PyPI.
 ///
@@ -1497,6 +1510,8 @@ impl AgentInstallService {
             .with_diagnostic("error", error.to_string())
         })?;
         let node_identity = node.fingerprint_identity();
+        let patch_dsh_model =
+            package.name == DEEPSEEK_HARNESS_ACP_PACKAGE && package.version == "0.4.43";
         let mut fingerprint_parts = vec![
             entry.id.as_str(),
             entry.version.as_str(),
@@ -1507,6 +1522,9 @@ impl AgentInstallService {
             args_identity.as_str(),
             node_identity.as_str(),
         ];
+        if patch_dsh_model {
+            fingerprint_parts.push(DSH_SINGLE_MODEL_PATCH_REVISION);
+        }
         if let Some(runtime_package) = runtime_package.as_ref() {
             fingerprint_parts.extend([
                 runtime_package.name.as_str(),
@@ -1537,6 +1555,23 @@ impl AgentInstallService {
         }
         self.install_verified_npm_packages(agent_id, &staging, &node, &packages)
             .await?;
+        if patch_dsh_model {
+            for (file, digest) in DSH_SINGLE_MODEL_SOURCES {
+                let server = staging
+                    .join("node_modules/@openma/deepseek-harness-acp/dist")
+                    .join(file);
+                ensure_regular_file(&staging, &server, "agent_dsh_server_missing")?;
+                let source = fs::read_to_string(&server).map_err(|error| {
+                    storage_error(
+                        "agent_dsh_server_read_failed",
+                        "DSH ACP source could not be read",
+                        error,
+                    )
+                })?;
+                let patched = dsh_single_model_source(&source, digest)?;
+                write_private_file(&server, patched.as_bytes())?;
+            }
+        }
         let adapter_script = staging.join(&adapter_script_rel);
         ensure_regular_file(&staging, &adapter_script, "agent_npm_bin_missing")?;
         let script = if let Some(companion_launcher) = companion_launcher.as_deref() {
@@ -4234,6 +4269,19 @@ child.on("close", (code, signal) => {{
     ))
 }
 
+fn dsh_single_model_source(source: &str, expected_sha256: &str) -> VibexResult<String> {
+    let original = "if (models.length >= 2) {";
+    if format!("{:x}", Sha256::digest(source.as_bytes())) != expected_sha256
+        || source.matches(original).count() != 1
+    {
+        return Err(VibexError::capability(
+            "agent_dsh_model_patch_source_mismatch",
+            "DSH ACP single-model compatibility patch does not match the verified source",
+        ));
+    }
+    Ok(source.replacen(original, "if (models.length >= 1) {", 1))
+}
+
 /// Launcher for the DeepSeek Harness ACP adapter.
 ///
 /// The adapter unpacks its bundled `vendor/dsh-runtime.tgz` on first launch.
@@ -4940,6 +4988,9 @@ fn managed_uvx_runtime_dependencies_are_current(
 }
 
 fn windows_npm_installation_is_current(record: &AgentManagedInstallationRecord) -> bool {
+    if !dsh_model_installation_is_current(record) {
+        return false;
+    }
     if !cfg!(windows) || record.state.distribution_kind != Some(AgentManagedDistributionKind::Npm) {
         return true;
     }
@@ -4961,6 +5012,37 @@ fn windows_npm_installation_is_current(record: &AgentManagedInstallationRecord) 
         .ok()
         .is_some_and(|source| source == NPM_WINDOWS_CHILD_PROCESS_HOOK_SOURCE.as_bytes());
     launcher_is_active && launcher_is_current && hook_is_current
+}
+
+fn dsh_model_installation_is_current(record: &AgentManagedInstallationRecord) -> bool {
+    if record.agent_id.as_str() != "deepseek-harness"
+        || record.state.installed_version.as_deref() != Some("0.4.43")
+    {
+        return true;
+    }
+    let Some(root) = record.install_root.as_deref().map(Path::new) else {
+        return false;
+    };
+    DSH_SINGLE_MODEL_SOURCES.iter().all(|(name, digest)| {
+        let file = root
+            .join("node_modules/@openma/deepseek-harness-acp/dist")
+            .join(name);
+        if ensure_regular_file(root, &file, "agent_dsh_server_missing").is_err() {
+            return false;
+        }
+        fs::read_to_string(file)
+            .ok()
+            .is_some_and(|patched| dsh_patched_model_source_is_current(&patched, digest))
+    })
+}
+
+fn dsh_patched_model_source_is_current(patched: &str, digest: &str) -> bool {
+    let needle = "if (models.length >= 1) {";
+    if patched.matches(needle).count() != 1 {
+        return false;
+    }
+    let original = patched.replacen(needle, "if (models.length >= 2) {", 1);
+    dsh_single_model_source(&original, digest).is_ok_and(|expected| expected == patched)
 }
 
 fn installation_files_are_usable(record: &AgentManagedInstallationRecord) -> bool {
@@ -6393,6 +6475,71 @@ mod tests {
         assert!(launcher.contains("createRequire(adapter)(\"tar\")"));
         assert!(launcher.contains("spawn(process.execPath, [adapter, ...process.argv.slice(2)]"));
         assert!(!launcher.contains("import(pathToFileURL"));
+    }
+
+    #[test]
+    fn model_review_deepseek_single_model_patch_preserves_reported_model() {
+        let source = "const models = await modelChoices(record);\nif (models.length >= 2) {\nresult.push({currentValue: models[0].value, options: models});\n}";
+        let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+        let patched = dsh_single_model_source(source, &digest).unwrap();
+        assert_eq!(
+            patched,
+            source.replace("models.length >= 2", "models.length >= 1")
+        );
+        assert!(patched.contains("currentValue: models[0].value"));
+        assert!(dsh_patched_model_source_is_current(&patched, &digest));
+        assert!(!dsh_patched_model_source_is_current(source, &digest));
+        assert!(!dsh_patched_model_source_is_current(
+            &(patched.clone() + "changed"),
+            &digest
+        ));
+        assert!(dsh_single_model_source(&patched, &digest).is_err());
+    }
+
+    #[test]
+    fn model_review_deepseek_single_model_patch_rejects_unknown_or_ambiguous_source() {
+        for source in ["", "if (models.length >= 2) {}\nif (models.length >= 2) {}"] {
+            let digest = format!("{:x}", Sha256::digest(source.as_bytes()));
+            assert!(dsh_single_model_source(source, &digest).is_err());
+        }
+        assert!(dsh_single_model_source("if (models.length >= 2) {}", DSH_SERVER_SHA256).is_err());
+    }
+
+    #[test]
+    fn model_review_deepseek_old_installation_requires_patch_before_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut record = AgentManagedInstallationRecord {
+            agent_id: AgentId::parse("deepseek-harness").unwrap(),
+            registry_agent_id: "deepseek-harness-acp".to_string(),
+            state: AgentManagedInstallState {
+                managed: true,
+                status: AgentManagedInstallStatus::Installed,
+                distribution_kind: Some(AgentManagedDistributionKind::Npm),
+                installed_version: Some("0.4.43".to_string()),
+                available_version: Some("0.4.43".to_string()),
+                last_error_code: None,
+                last_error_message: None,
+                updated_at_ms: Some(1),
+            },
+            command: None,
+            install_root: Some(temp.path().to_string_lossy().into_owned()),
+            updated_at_ms: 1,
+        };
+        assert!(!dsh_model_installation_is_current(&record));
+        assert!(!windows_npm_installation_is_current(&record));
+        let distribution = temp
+            .path()
+            .join("node_modules/@openma/deepseek-harness-acp/dist");
+        fs::create_dir_all(&distribution).unwrap();
+        for (name, _) in DSH_SINGLE_MODEL_SOURCES {
+            fs::write(distribution.join(name), "if (models.length >= 1) {}").unwrap();
+        }
+        assert!(!dsh_model_installation_is_current(&record));
+        record.state.installed_version = Some("0.4.44".to_string());
+        assert!(dsh_model_installation_is_current(&record));
+        record.state.installed_version = Some("0.4.43".to_string());
+        record.agent_id = AgentId::parse("codex").unwrap();
+        assert!(dsh_model_installation_is_current(&record));
     }
 
     #[test]

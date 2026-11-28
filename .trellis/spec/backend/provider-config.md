@@ -188,6 +188,25 @@ that provider-facing header from the embedding ACP client name. This preserves
 compatibility with Responses gateways that authorize the Codex HTTP engine while
 keeping ACP client attribution accurate.
 
+## DSH Custom Provider Isolation
+
+- Custom DSH projections use `VIBEX_DSH_PROVIDER_API_KEY` and the projected
+  route's credential alias, never `DEEPSEEK_API_KEY`. Pin `DSH_PROVIDER` to the
+  same route used by the settings overlay before session initialization.
+- Route names starting with `deepseek`, `openai`, or `anthropic` are prefixed
+  with `vibex-`, so bridge credential discovery cannot interpret a custom
+  route as a built-in vendor account. This intentionally changes those custom
+  route identities; existing sessions must restart under the new projection.
+- Managed DSH ACP 0.4.43 installations include an exact-source-SHA256-gated
+  single-model compatibility patch: publish the existing model select option
+  for one model as well as several. Preserve the bridge's actual currentValue;
+  never synthesize the selected model from the user's desired state. The
+  installation fingerprint includes the patch revision, preserving old caches.
+- Runtime probes use an advertised model select's `session/set_config_option`
+  contract. Only responses without a model option use legacy `session/set_model`.
+  Malformed or ambiguous options fail closed. No mutation success proves
+  provider authentication or upstream request success.
+
 ## Scenario: Route Model Runtime Options
 
 ### 1. Scope / Trigger

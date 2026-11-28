@@ -67,6 +67,10 @@ Start-VibexDevelopment.ps1 [-DataRoot <directory>] [-Tui]
   They share the same 180-second execution deadline and nonzero/no-ignored
   gate. Run the existing six suites unchanged; passing them does not substitute
   for probe isolation, projected Codex home and Windows junction regressions.
+- DSH credential projection regressions use suite `dsh`, filtering
+  `deepseek_harness` in `vibex-config-switch`. The managed single-model patch's
+  hash/shape guards run in the existing `model_review` runtime suite. Both
+  gates precede the full build and cannot be skipped on failure.
 - Codex live model regressions use the same library target with filter
   `runtime::tests::codex_model::` and suite `session`, in separate 20-minute
   compile and five-minute test steps. They must execute on Windows without

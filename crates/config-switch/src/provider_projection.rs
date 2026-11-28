@@ -1881,6 +1881,10 @@ fn project_provider_control(
                 overlays.push(catalog);
             }
             if *strategy == ConfigOverlayStrategy::DeepseekHarnessSettingsYaml {
+                env.insert(
+                    "DSH_PROVIDER".to_string(),
+                    deepseek_harness_route_id(provider),
+                );
                 // 0.1.7 of the bundled runtime stopped reading this Agent's
                 // `settings.yaml` for llm routes, so the same route is also
                 // written as the `$DSH_HOME/cordis.patch.yml` home patch the ACP
@@ -3748,12 +3752,20 @@ fn projected_runtime_model_id_aliases(
 /// name, so the settings overlay and the read-back alias must derive it the
 /// same way.
 fn deepseek_harness_route_id(provider: &ModelProviderProfile) -> String {
-    sanitize_provider_id(
+    let route = sanitize_provider_id(
         provider
             .vendor_hint
             .as_deref()
             .unwrap_or_else(|| provider.id.as_str()),
-    )
+    );
+    if ["openai", "deepseek", "anthropic"]
+        .iter()
+        .any(|prefix| route.starts_with(prefix))
+    {
+        format!("vibex-{route}")
+    } else {
+        route
+    }
 }
 
 /// The Secret environment name the ACP wrapper derives from a route id.
@@ -3761,10 +3773,7 @@ fn deepseek_harness_route_id(provider: &ModelProviderProfile) -> String {
 /// The wrapper gates every prompt on the name it computes from the *route*, not
 /// on the `apiKeyEnv` the route's `llm-pi-ai` entry declares: a route that is
 /// neither DeepSeek's own nor a known vendor resolves to
-/// `<ROUTE_ID>_API_KEY`. `deepseek-harness-acp` 0.4.33 started recording the
-/// resolved route id on the session record when a Model switch happens, so the
-/// first prompt after a switch asks for the derived name while `session/new` —
-/// which still sees no `--provider` — asks for `DEEPSEEK_API_KEY`.
+/// `<ROUTE_ID>_API_KEY`.
 ///
 /// The transform mirrors the wrapper exactly (collapse runs of non-alphanumeric
 /// characters into one `_`, then upper-case), so the projected route id and the
@@ -6529,12 +6538,6 @@ mod tests {
 
     #[test]
     fn deepseek_harness_projects_the_route_derived_credential_name_beside_the_declared_one() {
-        // The ACP wrapper gates every prompt on the name it derives from the
-        // route, while the settings overlay only declares `apiKeyEnv`. Both
-        // names must carry the selected Secret: `session/new` reads the
-        // declared one, and the first prompt after a Model switch reads the
-        // derived one, because 0.4.33 records the resolved route on the session
-        // record.
         assert_eq!(deepseek_harness_credential_env_key("acp"), "ACP_API_KEY");
         assert_eq!(
             deepseek_harness_credential_env_key("my--route"),
@@ -6557,8 +6560,6 @@ mod tests {
         )
         .unwrap();
 
-        // The settings overlay keeps naming the declared key, which is what the
-        // launch-level gate resolves before `session/new`.
         let overlay = plan
             .overlay_files
             .iter()
@@ -6569,14 +6570,20 @@ mod tests {
             .as_mapping()
             .and_then(|providers| providers.values().next())
             .expect("the settings register exactly one route");
-        assert_eq!(route["apiKeyEnv"].as_str(), Some("DEEPSEEK_API_KEY"));
+        assert_eq!(
+            route["apiKeyEnv"].as_str(),
+            Some("VIBEX_DSH_PROVIDER_API_KEY")
+        );
 
         let keys = plan
             .secret_env
             .iter()
             .map(|reference| reference.key.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(keys, vec!["DEEPSEEK_API_KEY", "MATRIX_PROVIDER_API_KEY"]);
+        assert_eq!(
+            keys,
+            vec!["VIBEX_DSH_PROVIDER_API_KEY", "MATRIX_PROVIDER_API_KEY"]
+        );
         assert_eq!(
             plan.secret_env[0].credential_id,
             plan.secret_env[1].credential_id
@@ -6585,6 +6592,65 @@ mod tests {
             plan.secret_env[0].secret_reference,
             plan.secret_env[1].secret_reference
         );
+        assert_eq!(
+            plan.non_secret_env.get("DSH_PROVIDER").map(String::as_str),
+            Some("matrix-provider")
+        );
+    }
+
+    #[test]
+    fn deepseek_harness_custom_credentials_never_use_builtin_provider_keys() {
+        let descriptors = vibex_core::catalog_projection_descriptors().unwrap();
+        let descriptor = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route.agent_id.as_str() == "deepseek-harness")
+            .unwrap();
+        for vendor in [
+            "deepseek",
+            "deepseek-official",
+            "deepseek-account",
+            "openai",
+            "openai-custom",
+            "anthropic",
+            "acp",
+        ] {
+            let (mut provider, runtime, binding) = typed_projection_fixture(descriptor);
+            provider.vendor_hint = Some(vendor.to_string());
+            let plan = AgentProviderProjectionEngine::plan(
+                &provider,
+                &runtime,
+                &binding,
+                descriptor,
+                "credential-isolation",
+            )
+            .unwrap();
+            let route = deepseek_harness_route_id(&provider);
+            assert_eq!(plan.non_secret_env.get("DSH_PROVIDER"), Some(&route));
+            assert!(plan.secret_env.iter().all(|entry| {
+                ![
+                    "DEEPSEEK_API_KEY",
+                    "DEEPSEEK_ACCOUNT_API_KEY",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                ]
+                .contains(&entry.key.as_str())
+            }));
+            assert!(
+                plan.secret_env
+                    .iter()
+                    .any(|entry| entry.key == deepseek_harness_credential_env_key(&route))
+            );
+            let settings: serde_yaml::Value =
+                serde_yaml::from_str(&plan.overlay_files[0].content).unwrap();
+            assert_eq!(
+                settings["agent-default-model"]["provider"].as_str(),
+                Some(route.as_str())
+            );
+            assert_eq!(
+                settings["llm-pi-ai"]["providers"][route.as_str()]["apiKeyEnv"].as_str(),
+                Some("VIBEX_DSH_PROVIDER_API_KEY")
+            );
+        }
     }
 
     #[test]
@@ -8294,7 +8360,7 @@ mod tests {
                 agent_id: "deepseek-harness",
                 base_url_key: None,
                 fixed_base_url: None,
-                secret_env_key: "DEEPSEEK_API_KEY",
+                secret_env_key: "VIBEX_DSH_PROVIDER_API_KEY",
                 model_env_key: None,
                 overlay_path: Some("settings.yaml"),
                 overlay_format: Some("yaml"),

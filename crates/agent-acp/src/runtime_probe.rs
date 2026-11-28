@@ -41,7 +41,7 @@ use crate::runtime::{
     extract_current_model_id, extract_model_ids, validate_restore_response,
 };
 
-const PROBE_SOURCE_REVISION: &str = "runtime-probe-v5";
+const PROBE_SOURCE_REVISION: &str = "runtime-probe-v6";
 const MIN_DIAGNOSTIC_LEN: usize = 1;
 const PROBE_ENV_KEYS: &[&str] = &[
     "HOME",
@@ -678,15 +678,10 @@ impl AcpRuntimeClient {
                         probe_current_model_id(Some(identity), &initialize, &session).as_deref(),
                     )
                 } else {
+                    let (method, params) =
+                        probe_model_mutation(&session, _native_session_id_guard, model)?;
                     let result = process
-                        .request(
-                            AcpOperation::SessionSetModel.method(),
-                            protocol::build_session_set_model_params(
-                                _native_session_id_guard,
-                                model,
-                            ),
-                            timeout_duration.min(ACP_PROBE_TIMEOUT),
-                        )
+                        .request(method, params, timeout_duration.min(ACP_PROBE_TIMEOUT))
                         .await;
                     match result {
                         Ok(response) => {
@@ -1309,6 +1304,63 @@ fn classify_startup_model(
     }
 }
 
+fn probe_model_mutation(
+    session: &Value,
+    session_id: &str,
+    model: &str,
+) -> VibexResult<(&'static str, Value)> {
+    let options = match session.get("configOptions") {
+        None => None,
+        Some(Value::Array(options)) => Some(options),
+        Some(_) => {
+            return Err(VibexError::capability(
+                "agent_probe_model_options_invalid",
+                "ACP configuration options must be an array",
+            ));
+        }
+    };
+    let model_options = options
+        .into_iter()
+        .flatten()
+        .filter(|option| {
+            option.get("category").and_then(Value::as_str) == Some("model")
+                || option.get("id").and_then(Value::as_str) == Some("model")
+        })
+        .collect::<Vec<_>>();
+    if model_options.is_empty() {
+        return Ok((
+            AcpOperation::SessionSetModel.method(),
+            protocol::build_session_set_model_params(session_id, model),
+        ));
+    }
+    let [option] = model_options.as_slice() else {
+        return Err(VibexError::capability(
+            "agent_probe_model_option_ambiguous",
+            "ACP model configuration option is ambiguous",
+        ));
+    };
+    let option_id = option
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            VibexError::capability(
+                "agent_probe_model_option_invalid",
+                "ACP model configuration option has no identity",
+            )
+        })?;
+    if option.get("type").and_then(Value::as_str) != Some("select") {
+        return Err(VibexError::capability(
+            "agent_probe_model_option_invalid",
+            "ACP model configuration option is not a select",
+        ));
+    }
+    Ok((
+        AcpOperation::SessionSetConfigOption.method(),
+        protocol::build_session_set_config_option_raw_params(session_id, option_id, json!(model)),
+    ))
+}
+
 fn probe_current_model_id(
     identity: Option<&vibex_core::AgentRuntimeVersionIdentity>,
     initialize: &Value,
@@ -1905,6 +1957,63 @@ mod tests {
                 .as_deref(),
             Some("startup_model_not_applied")
         );
+    }
+
+    #[test]
+    fn advertised_model_option_uses_config_mutation_for_single_and_multiple_models() {
+        for models in [vec!["model-a"], vec!["model-a", "model-b"]] {
+            let response = json!({"configOptions": [{"id": "model-picker", "category": "model", "type": "select", "currentValue": "model-a", "options": models.iter().map(|model| json!({"value": model, "name": model})).collect::<Vec<_>>()}]});
+            let (method, params) =
+                probe_model_mutation(&response, "native-session", "model-a").unwrap();
+            assert_eq!(method, "session/set_config_option");
+            assert_eq!(
+                params,
+                json!({"sessionId": "native-session", "configId": "model-picker", "value": "model-a"})
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_model_probe_remains_supported_without_config_option() {
+        let (method, params) = probe_model_mutation(
+            &json!({"models": {"currentModelId": "model-a"}}),
+            "native-session",
+            "model-a",
+        )
+        .unwrap();
+        assert_eq!(method, "session/set_model");
+        assert_eq!(
+            params,
+            protocol::build_session_set_model_params("native-session", "model-a")
+        );
+    }
+
+    #[test]
+    fn malformed_model_options_do_not_fall_back_to_legacy_mutation() {
+        for value in [json!(null), json!({}), json!(false), json!("model")] {
+            assert!(
+                probe_model_mutation(
+                    &json!({"configOptions": value}),
+                    "native-session",
+                    "model-a"
+                )
+                .is_err()
+            );
+        }
+        for options in [
+            json!([{"category": "model", "type": "select"}]),
+            json!([{"id": "model", "type": "boolean"}]),
+            json!([{"id": "model", "type": "select"}, {"id": "other", "category": "model", "type": "select"}]),
+        ] {
+            assert!(
+                probe_model_mutation(
+                    &json!({"configOptions": options}),
+                    "native-session",
+                    "model-a"
+                )
+                .is_err()
+            );
+        }
     }
 
     fn codex_model_initialize() -> Value {
