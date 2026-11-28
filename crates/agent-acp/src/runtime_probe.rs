@@ -40,7 +40,7 @@ use crate::runtime::{
     extract_current_model_id, extract_model_ids, validate_restore_response,
 };
 
-const PROBE_SOURCE_REVISION: &str = "runtime-probe-v4";
+const PROBE_SOURCE_REVISION: &str = "runtime-probe-v5";
 const MIN_DIAGNOSTIC_LEN: usize = 1;
 const PROBE_ENV_KEYS: &[&str] = &[
     "HOME",
@@ -674,7 +674,7 @@ impl AcpRuntimeClient {
                     classify_startup_model(
                         model,
                         startup_model,
-                        extract_current_model_id(&session).as_deref(),
+                        probe_current_model_id(Some(identity), &initialize, &session).as_deref(),
                     )
                 } else {
                     let result = process
@@ -739,6 +739,7 @@ impl AcpRuntimeClient {
                 AgentRuntimeProbeStage::ConfirmingEffectiveProvider,
             )?;
             let provider_fact = effective_provider_fact(
+                Some(identity),
                 &initialize,
                 &session,
                 model_apply_response.as_ref(),
@@ -1307,7 +1308,71 @@ fn classify_startup_model(
     }
 }
 
+fn probe_current_model_id(
+    identity: Option<&vibex_core::AgentRuntimeVersionIdentity>,
+    initialize: &Value,
+    response: &Value,
+) -> Option<String> {
+    let observed = extract_current_model_id(response)?;
+    let supported = identity.is_some_and(|identity| {
+        identity.route.agent_id.as_str() == crate::registry::CODEX_AGENT_ID
+            && identity.route.adapter_id.as_str() == crate::registry::CODEX_ADAPTER_ID
+            && identity.route.transport_kind == vibex_core::TransportKind::Acp
+            && identity.adapter_version.as_deref() == Some("2.12.0")
+            && extract_reported_adapter_version(initialize) == Some("2.12.0")
+            && initialize
+                .pointer("/agentInfo/name")
+                .and_then(Value::as_str)
+                == Some(crate::registry::CODEX_ADAPTER_PACKAGE)
+    });
+    if supported && let Some(model) = codex_model_with_consistent_options(response, &observed) {
+        return Some(model.to_string());
+    }
+    Some(observed)
+}
+
+fn codex_model_with_consistent_options<'a>(response: &Value, observed: &'a str) -> Option<&'a str> {
+    let (model, suffix) = observed.split_once('[')?;
+    let effort = suffix.strip_suffix(']')?;
+    if model.is_empty()
+        || model.trim() != model
+        || model.contains(']')
+        || effort.is_empty()
+        || !effort
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return None;
+    }
+    let options = response.get("configOptions")?.as_array()?;
+    for (id, category, expected) in [
+        ("model", "model", model),
+        ("reasoning_effort", "thought_level", effort),
+    ] {
+        let mut matches = options.iter().filter(|option| {
+            option.get("id").and_then(Value::as_str) == Some(id)
+                || option.get("category").and_then(Value::as_str) == Some(category)
+        });
+        let Some(option) = matches.next() else {
+            if id == "reasoning_effort" {
+                continue;
+            }
+            return None;
+        };
+        if matches.next().is_some()
+            || option.get("id").and_then(Value::as_str) != Some(id)
+            || option.get("category").and_then(Value::as_str) != Some(category)
+            || option.get("type").and_then(Value::as_str) != Some("select")
+            || option.get("currentValue").and_then(Value::as_str) != Some(expected)
+        {
+            return None;
+        }
+    }
+    Some(model)
+}
+
 fn effective_provider_fact(
+    identity: Option<&vibex_core::AgentRuntimeVersionIdentity>,
     initialize: &Value,
     session: &Value,
     model_apply_response: Option<&Value>,
@@ -1332,9 +1397,9 @@ fn effective_provider_fact(
     });
     let target_model = projection.and_then(|value| value.effective_model.as_deref());
     let current_model = model_apply_response
-        .and_then(extract_current_model_id)
-        .or_else(|| extract_current_model_id(session))
-        .or_else(|| extract_current_model_id(initialize))
+        .and_then(|value| probe_current_model_id(identity, initialize, value))
+        .or_else(|| probe_current_model_id(identity, initialize, session))
+        .or_else(|| probe_current_model_id(identity, initialize, initialize))
         .or_else(|| startup_model.map(ToString::to_string));
     classify_effective_provider(
         explicit,
@@ -1880,6 +1945,219 @@ mod tests {
         );
     }
 
+    fn codex_model_initialize() -> Value {
+        json!({"agentInfo": {"name": "@agentclientprotocol/codex-acp", "version": "2.12.0"}})
+    }
+
+    fn codex_effort_session(model: &str, effort: &str) -> Value {
+        json!({
+            "models": {"currentModelId": format!("{model}[{effort}]")},
+            "configOptions": [
+                {"id": "model", "category": "model", "type": "select", "currentValue": model},
+                {"id": "reasoning_effort", "category": "thought_level", "type": "select", "currentValue": effort}
+            ]
+        })
+    }
+
+    #[test]
+    fn codex_probe_decodes_model_with_consistent_live_config_evidence() {
+        for effort in ["low", "medium", "high", "xhigh", "provider-depth"] {
+            let session = codex_effort_session("provider/model", effort);
+            let model = probe_current_model_id(
+                Some(&codex_identity()),
+                &codex_model_initialize(),
+                &session,
+            );
+            assert_eq!(model.as_deref(), Some("provider/model"));
+            assert_eq!(
+                classify_startup_model("provider/model", Some("provider/model"), model.as_deref())
+                    .status,
+                AgentRuntimeProbeFactStatus::Passed
+            );
+            assert_eq!(
+                classify_startup_model("other-model", Some("other-model"), model.as_deref()).status,
+                AgentRuntimeProbeFactStatus::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn codex_custom_model_without_effort_option_keeps_base_model_evidence() {
+        let response = json!({
+            "models": {"currentModelId": "provider/custom-model[medium]"},
+            "configOptions": [
+                {"id": "model", "category": "model", "type": "select", "currentValue": "provider/custom-model"}
+            ]
+        });
+        let model = probe_current_model_id(
+            Some(&codex_identity()),
+            &codex_model_initialize(),
+            &response,
+        );
+        assert_eq!(model.as_deref(), Some("provider/custom-model"));
+        assert_eq!(
+            classify_startup_model(
+                "provider/custom-model",
+                Some("provider/custom-model"),
+                model.as_deref()
+            )
+            .status,
+            AgentRuntimeProbeFactStatus::Passed
+        );
+        assert_eq!(
+            classify_startup_model(
+                "provider/custom-model[high]",
+                Some("provider/custom-model[high]"),
+                model.as_deref()
+            )
+            .status,
+            AgentRuntimeProbeFactStatus::Failed
+        );
+    }
+
+    #[test]
+    fn codex_probe_keeps_encoded_model_when_config_evidence_is_missing_or_conflicts() {
+        let session = codex_effort_session("target-model", "high");
+        let mut missing_options = session.clone();
+        missing_options
+            .as_object_mut()
+            .unwrap()
+            .remove("configOptions");
+        let mut missing_model = session.clone();
+        missing_model["configOptions"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let mut wrong_model = session.clone();
+        wrong_model["configOptions"][0]["currentValue"] = json!("other-model");
+        let mut wrong_effort = session.clone();
+        wrong_effort["configOptions"][1]["currentValue"] = json!("low");
+        let mut wrong_type = session.clone();
+        wrong_type["configOptions"][1]["type"] = json!("boolean");
+        let mut duplicate = session.clone();
+        duplicate["configOptions"]
+            .as_array_mut()
+            .unwrap()
+            .push(session["configOptions"][1].clone());
+        let mut alias = session.clone();
+        alias["configOptions"][1]["id"] = json!("effort");
+        for response in [
+            missing_options,
+            missing_model,
+            wrong_model,
+            wrong_effort,
+            wrong_type,
+            duplicate,
+            alias,
+        ] {
+            let observed = probe_current_model_id(
+                Some(&codex_identity()),
+                &codex_model_initialize(),
+                &response,
+            );
+            assert_eq!(observed.as_deref(), Some("target-model[high]"));
+            assert_eq!(
+                classify_startup_model("target-model", Some("target-model"), observed.as_deref())
+                    .status,
+                AgentRuntimeProbeFactStatus::Failed
+            );
+        }
+    }
+
+    #[test]
+    fn codex_probe_model_decoding_requires_exact_route_and_reported_adapter() {
+        let session = codex_effort_session("target-model", "high");
+        let identity = codex_identity();
+        let initialize = codex_model_initialize();
+        let mut other_agent = identity.clone();
+        other_agent.route.agent_id = AgentId::parse("copilot").unwrap();
+        let mut other_adapter = identity.clone();
+        other_adapter.route.adapter_id = AcpAdapterId::parse("custom-codex").unwrap();
+        let mut older = identity.clone();
+        older.adapter_version = Some("2.11.0".to_string());
+        let mut newer = identity.clone();
+        newer.adapter_version = Some("2.13.0".to_string());
+        let mut missing = identity.clone();
+        missing.adapter_version = None;
+        for candidate in [&other_agent, &other_adapter, &older, &newer, &missing] {
+            assert_eq!(
+                probe_current_model_id(Some(candidate), &initialize, &session).as_deref(),
+                Some("target-model[high]")
+            );
+        }
+        for reported in [
+            json!({}),
+            json!({"agentInfo": {"version": "2.12.0"}}),
+            json!({"agentInfo": {"name": "other", "version": "2.12.0"}}),
+            json!({"agentInfo": {"name": "@agentclientprotocol/codex-acp", "version": "2.13.0"}}),
+        ] {
+            assert_eq!(
+                probe_current_model_id(Some(&identity), &reported, &session).as_deref(),
+                Some("target-model[high]")
+            );
+        }
+        assert_eq!(
+            probe_current_model_id(None, &initialize, &session).as_deref(),
+            Some("target-model[high]")
+        );
+    }
+
+    #[test]
+    fn codex_probe_model_decoding_rejects_malformed_variants() {
+        for encoded in [
+            "target-model[]",
+            "target-model[high][low]",
+            "target-model[high]junk",
+            "target-model[[high]]",
+            "[high]",
+            "target-model[high",
+            "target-model[ high]",
+            "target-model[high,fast=true]",
+        ] {
+            let mut session = codex_effort_session("target-model", "high");
+            session["models"]["currentModelId"] = json!(encoded);
+            assert_eq!(codex_model_with_consistent_options(&session, encoded), None);
+            assert_eq!(
+                probe_current_model_id(
+                    Some(&codex_identity()),
+                    &codex_model_initialize(),
+                    &session
+                )
+                .as_deref(),
+                Some(encoded)
+            );
+        }
+        let plain = json!({"models": {"currentModelId": "target-model"}});
+        assert_eq!(
+            probe_current_model_id(Some(&codex_identity()), &codex_model_initialize(), &plain)
+                .as_deref(),
+            Some("target-model")
+        );
+    }
+
+    #[test]
+    fn decoded_codex_model_does_not_supply_authentication_or_provider_identity() {
+        let session = codex_effort_session("target-model", "high");
+        let model =
+            probe_current_model_id(Some(&codex_identity()), &codex_model_initialize(), &session);
+        assert_eq!(
+            classify_authentication(None, true).status,
+            AgentRuntimeProbeFactStatus::Blocked
+        );
+        for endpoint in [None, Some("https://wrong.example")] {
+            assert_eq!(
+                classify_effective_provider(
+                    endpoint,
+                    &["https://expected.example".to_string()],
+                    Some("target-model"),
+                    model.as_deref()
+                )
+                .status,
+                AgentRuntimeProbeFactStatus::Blocked
+            );
+        }
+    }
+
     #[test]
     fn model_catalog_does_not_confirm_effective_provider_or_model() {
         let projection = ResolvedAgentProviderProjection {
@@ -1897,8 +2175,15 @@ mod tests {
             session_header_env: Vec::new(),
         };
         let session = json!({"models": {"availableModels": [{"modelId": "target-model"}]}});
-        let fact =
-            effective_provider_fact(&json!({}), &session, None, None, Some(&projection), &[]);
+        let fact = effective_provider_fact(
+            None,
+            &json!({}),
+            &session,
+            None,
+            None,
+            Some(&projection),
+            &[],
+        );
         assert_eq!(fact.status, AgentRuntimeProbeFactStatus::Blocked);
         assert_eq!(
             fact.diagnostic_code.as_deref(),
@@ -1923,6 +2208,7 @@ mod tests {
             session_header_env: Vec::new(),
         };
         let fact = effective_provider_fact(
+            None,
             &json!({"endpoint": "https://profile.example"}),
             &json!({}),
             None,
@@ -1931,6 +2217,36 @@ mod tests {
             &["https://profile.example".to_string()],
         );
         assert_eq!(fact.status, AgentRuntimeProbeFactStatus::Passed);
+        let mut session = codex_effort_session("target-model", "medium");
+        session["endpoint"] = json!("https://profile.example/v1");
+        let identity = codex_identity();
+        let initialize = codex_model_initialize();
+        let provider_fact = |response: &Value| {
+            effective_provider_fact(
+                Some(&identity),
+                &initialize,
+                response,
+                None,
+                Some("target-model"),
+                Some(&projection),
+                &["https://profile.example".to_string()],
+            )
+        };
+        assert_eq!(
+            provider_fact(&session).status,
+            AgentRuntimeProbeFactStatus::Passed
+        );
+        session["endpoint"] = json!("https://wrong.example");
+        assert_eq!(
+            provider_fact(&session).status,
+            AgentRuntimeProbeFactStatus::Blocked
+        );
+        session["endpoint"] = json!("https://profile.example");
+        session["configOptions"][1]["currentValue"] = json!("high");
+        assert_eq!(
+            provider_fact(&session).status,
+            AgentRuntimeProbeFactStatus::Blocked
+        );
     }
 
     #[test]

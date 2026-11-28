@@ -5090,8 +5090,8 @@ check:agent-provider-runtime[:self-test]
   missing/file target, symlink, or Windows reparse directory before spawning;
   verify canonical containment as well. Without a Codex projection, retain the
   generic probe home. Keep all protected-key duplicate removal intact.
-- `runtime-probe-v4` retains the v3 home-selection behavior and separates
-  Codex Adapter identity from underlying Agent identity. Codex ACP's
+- `runtime-probe-v5` retains the v3 home-selection and v4 identity behavior,
+  separating Codex Adapter identity from underlying Agent identity. Codex ACP's
   `agentInfo.version` identifies the Adapter; it must not be compared with or
   persisted as the underlying Codex version. Missing underlying version
   evidence remains blocked, even when the expected version is known locally.
@@ -5104,6 +5104,22 @@ check:agent-provider-runtime[:self-test]
   A discovery catalog or an isolated empty home alone is not model evidence.
   An explicit conflicting session model fails even when the startup override
   matches the requested model.
+  For the exact `codex`/`codex-acp` route and configured plus reported Adapter
+  version `2.12.0`, the probe can decode the legacy `model[effort]` session id
+  only when initialize names the expected Adapter package and the same
+  response has a unique typed `model`/`model` select option matching the
+  encoded base model. When a `reasoning_effort`/`thought_level` option is
+  present, its type and current value must also match the encoded effort.
+  The Adapter can omit that option for custom models without advertised
+  effort support; its absence does not invalidate the explicit base-model
+  evidence, but it does not verify reasoning support or a requested level.
+  Unknown versions, missing base-model evidence, conflicting options,
+  duplicates and malformed variants keep the raw id and remain mismatches.
+  Do not use a generic bracket-stripping rule.
+  Use this same bounded decoding for model-selection and effective-provider
+  comparison; it never supplies endpoint, upstream authentication or a
+  requested reasoning-effort guarantee. The probe request selects a model,
+  not a reasoning level; effort matching here validates consistent reporting.
   Regressions must also retain materialized config/catalog reads, isolation
   rejection, fallback, and unchanged Copilot startup arguments.
 - Adapter authentication status that labels a configured custom gateway is
