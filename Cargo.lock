@@ -10741,6 +10741,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "vibex-agent",
  "vibex-backend",
  "vibex-computer",
  "vibex-core",

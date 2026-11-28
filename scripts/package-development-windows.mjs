@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkDevelopmentWindowsShaders } from "./check-development-windows-shaders.mjs";
+import { checkDevelopmentDelegation } from "./check-development-delegation.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -119,6 +120,9 @@ function main() {
   }
   const tuiVersion = run(join(output, "vibex.exe"), ["--version"], { cwd: probeHome, env });
   if (tuiVersion !== `vibex ${version}`) throw new Error(`Unexpected terminal version: ${tuiVersion}`);
+  const delegationSidecars = Object.fromEntries(["vibex.exe", "vibex-desktop.exe"].map((name) => [
+    name, checkDevelopmentDelegation(join(output, name), version, { cwd: probeHome, env })
+  ]));
   writeFileSync(join(probeHome, "desktop-probe.json"), `${probeText}\n`);
   const files = payload.map(([, path]) => {
     const bytes = readFileSync(join(output, path));
@@ -135,6 +139,7 @@ function main() {
       windowsX64Executables: "passed", desktopProbe: "passed", tuiVersion: "passed",
       embeddedAssets: "checked_by_rust_include_bytes", fileHashes: "sha256",
       embeddedWindowsShaders,
+      delegationSidecars,
       nativePixelsVerified: false, localGuiAcceptance: "required"
     },
     resources: { fonts: "embedded", icons: "embedded", windowsShaders: "embedded_dxbc", pdfium: "not_bundled_windows_validation_deferred" },

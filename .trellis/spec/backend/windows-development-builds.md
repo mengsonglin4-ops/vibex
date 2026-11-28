@@ -188,7 +188,23 @@ Correct: disable debug assertions in both the library and build script, require
 FXC, inspect embedded shader bytes before upload, preserve the launcher runtime
 environment and report local GUI acceptance separately.
 
-## 8. Windows accessibility shutdown
+## 8. Delegation entrypoint packaging gate
+
+- The standalone `vibex` client selects itself as its delegation MCP sidecar.
+  Dispatch `--agent-delegation-mcp` to the existing Agent stdio service before
+  terminal parsing or runtime creation. Do not replace this with a test-only
+  executable redirect or copy the service into the client.
+- Packaging must run an actual initialize/ping stdio exchange against both
+  portable executables and record `checks.delegationSidecars`. Use synthetic
+  loopback configuration: these methods do not contact the broker or a model.
+  Require the expected service identity/version, both successful responses,
+  and exit code zero within 15 seconds. A CLI version check alone misses a
+  terminal binary that rejects its own sidecar argument.
+- This adds only a workspace dependency edge to the already locked Agent crate;
+  no third-party version changes are needed. Handshake success still does not
+  prove real Agent delegation or owner-review completion.
+
+## 9. Windows accessibility shutdown
 
 - AccessKit providers can receive COM geometry queries after a native HWND is
   destroyed. Normal app exit must disconnect process-owned UIA providers before

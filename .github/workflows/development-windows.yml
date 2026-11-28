@@ -105,6 +105,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Portable shader gate regression checks failed' }
           node --test scripts/run-model-review-tests.test.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Model review test runner self-tests failed' }
+          node --test scripts/check-development-delegation.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Delegation sidecar gate regression checks failed' }
           cargo metadata --locked --no-deps --format-version 1 > "$env:RUNNER_TEMP\vibex-metadata.json"
           if ($LASTEXITCODE -ne 0) { throw 'Locked workspace metadata failed' }
       - name: Compile Git review tests

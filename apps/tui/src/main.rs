@@ -51,6 +51,11 @@ impl From<SeatError> for Failure {
 }
 
 fn run(arguments: Vec<String>) -> Result<ExitCode, Failure> {
+    if arguments.len() == 1 && arguments[0] == "--agent-delegation-mcp" {
+        return vibex_agent::run_delegation_mcp_stdio()
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(Failure::Message);
+    }
     // The computer-use command line is a thin client of an *already running*
     // runtime, so it is answered before any seat resolution: an Agent's shell
     // must not start or attach to a runtime to call one desktop tool. The
